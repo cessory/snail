@@ -12,7 +12,7 @@ static std::unordered_map<ErrCode, std::string> codeMaps = {
     {ErrCode::ErrNoFreeBlocks, "no free blocks"},
     {ErrCode::ErrDisk, "disk error"},
     {ErrCode::ErrWriteDisk, "write disk error"},
-    {ErrCode::ErrInvalidPos, "invalid position"},
+    {ErrCode::ErrInvalidOffset, "invalid offset"},
     {ErrCode::ErrInvalidParameter, "invalid parameter"},
     {ErrCode::ErrTooShort, "data too short"},
     {ErrCode::ErrNotFoundChunk, "not found chunk"},
@@ -27,18 +27,18 @@ static std::unordered_map<ErrCode, std::string> codeMaps = {
 };
 
 std::string GetReason(ErrCode code) {
-    auto iter = codeMaps.find(code);
-    if (iter == codeMaps.end()) {
-        return "unknown error";
-    }
-    return iter->second;
+  auto iter = codeMaps.find(code);
+  if (iter == codeMaps.end()) {
+    return "unknown error";
+  }
+  return iter->second;
 }
 
 seastar::sstring ToJsonString(ErrCode code, const std::string& reason) {
-    std::ostringstream oss;
-    oss << "{\"code\": " << static_cast<int>(code) << ", \"message\": \""
-        << (reason == "" ? GetReason(code) : reason) << "\"}";
-    return oss.str();
+  std::ostringstream oss;
+  oss << "{\"code\": " << static_cast<int>(code) << ", \"message\": \""
+      << (reason == "" ? GetReason(code) : reason) << "\"}";
+  return oss.str();
 }
 
 }  // namespace stream
