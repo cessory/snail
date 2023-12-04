@@ -4,7 +4,6 @@
 #include <tuple>
 
 namespace snail {
-namespace stream {
 
 enum class ErrCode {
   OK = 0,
@@ -164,5 +163,4 @@ class Status<> {
 
 seastar::sstring ToJsonString(ErrCode code, const std::string& reason = "");
 
-}  // namespace stream
 }  // namespace snail

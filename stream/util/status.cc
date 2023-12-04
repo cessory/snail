@@ -3,7 +3,6 @@
 #include <unordered_map>
 
 namespace snail {
-namespace stream {
 
 static std::unordered_map<ErrCode, std::string> codeMaps = {
     {ErrCode::OK, "OK"},
@@ -41,5 +40,4 @@ seastar::sstring ToJsonString(ErrCode code, const std::string& reason) {
   return oss.str();
 }
 
-}  // namespace stream
 }  // namespace snail
