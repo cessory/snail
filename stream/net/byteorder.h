@@ -4,8 +4,9 @@ namespace snail {
 namespace net {
 
 class LittleEndian {
-    static inline uint16_t Uint16(char *b) {
-        uint16_t *v = reinterpret_cast<uint16_t *>(b);
+   public:
+    static inline uint16_t Uint16(const char *b) {
+        const uint16_t *v = reinterpret_cast<const uint16_t *>(b);
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         return *v;
@@ -13,8 +14,8 @@ class LittleEndian {
         return __builtin_bswap16(*v);
 #endif
     }
-    static inline uint32_t Uint32(char *b) {
-        uint32_t *v = reinterpret_cast<uint32_t *>(b);
+    static inline uint32_t Uint32(const char *b) {
+        const uint32_t *v = reinterpret_cast<const uint32_t *>(b);
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         return *v;
@@ -23,8 +24,8 @@ class LittleEndian {
 #endif
     }
 
-    static inline uint64_t Uint64(char *b) {
-        uint64_t *v = reinterpret_cast<uint64_t *>(b);
+    static inline uint64_t Uint64(const char *b) {
+        const uint64_t *v = reinterpret_cast<const uint64_t *>(b);
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         return *v;
@@ -65,8 +66,9 @@ class LittleEndian {
 };
 
 class BigEndian {
-    static inline uint16_t Uint16(char *b) {
-        uint16_t *v = reinterpret_cast<uint16_t *>(b);
+   public:
+    static inline uint16_t Uint16(const char *b) {
+        const uint16_t *v = reinterpret_cast<const uint16_t *>(b);
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         return __builtin_bswap16(*v);
@@ -74,8 +76,8 @@ class BigEndian {
         return *v;
 #endif
     }
-    static inline uint32_t Uint32(char *b) {
-        uint32_t *v = reinterpret_cast<uint32_t *>(b);
+    static inline uint32_t Uint32(const char *b) {
+        const uint32_t *v = reinterpret_cast<const uint32_t *>(b);
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         return __builtin_bswap32(*v);
@@ -84,8 +86,8 @@ class BigEndian {
 #endif
     }
 
-    static inline uint64_t Uint64(char *b) {
-        uint64_t *v = reinterpret_cast<uint64_t *>(b);
+    static inline uint64_t Uint64(const char *b) {
+        const uint64_t *v = reinterpret_cast<const uint64_t *>(b);
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         return __builtin_bswap64(*v);

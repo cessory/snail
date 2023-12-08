@@ -1,5 +1,12 @@
 #pragma once
 
+#include <seastar/core/future.hh>
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/temporary_buffer.hh>
+#include <seastar/net/packet.hh>
+
+#include "util/status.h"
+
 namespace snail {
 namespace net {
 
@@ -8,7 +15,7 @@ namespace net {
 class Connection {
    public:
     virtual ~Connection() {}
-    virtual seastar::future<Status<>> Write(seastar::net::packet p) = 0;
+    virtual seastar::future<Status<>> Write(seastar::net::packet&& p) = 0;
     virtual seastar::future<Status<>> Flush() = 0;
     virtual seastar::future<Status<seastar::temporary_buffer<char>>> Read() = 0;
     virtual seastar::future<Status<seastar::temporary_buffer<char>>>

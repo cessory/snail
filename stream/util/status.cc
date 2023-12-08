@@ -6,38 +6,31 @@ namespace snail {
 
 static std::unordered_map<ErrCode, std::string> codeMaps = {
     {ErrCode::OK, "OK"},
-    {ErrCode::ErrExistChunk, "chunk has already exist"},
-    {ErrCode::ErrNoFreeChunks, "no free chunks"},
-    {ErrCode::ErrNoFreeBlocks, "no free blocks"},
-    {ErrCode::ErrDisk, "disk error"},
-    {ErrCode::ErrWriteDisk, "write disk error"},
-    {ErrCode::ErrInvalidOffset, "invalid offset"},
-    {ErrCode::ErrInvalidParameter, "invalid parameter"},
+    {ErrCode::ErrEOF, "end of file"},
+    {ErrCode::ErrExistExtent, "extent has already exist"},
+    {ErrCode::ErrOverWrite, "write disk error"},
     {ErrCode::ErrTooShort, "data too short"},
-    {ErrCode::ErrNotFoundChunk, "not found chunk"},
+    {ErrCode::ErrTooLarge, "data too larger"},
     {ErrCode::ErrInvalidChecksum, "invalid checksum"},
-    {ErrCode::ErrDiskIDNotMatch, "diskid not match"},
-    {ErrCode::ErrDeletedChunk, "chunk has been deleted"},
-    {ErrCode::ErrInvalidLease, "invalid lease"},
-    {ErrCode::ErrMsgTooLarge, "payload too large"},
-    {ErrCode::ErrMissingLength, "missing length"},
-    {ErrCode::ErrChunkConflict, "chunk conflict write"},
     {ErrCode::ErrSystem, "system error"},
 };
 
 std::string GetReason(ErrCode code) {
-  auto iter = codeMaps.find(code);
-  if (iter == codeMaps.end()) {
-    return "unknown error";
-  }
-  return iter->second;
+    if (static_cast<int>(code) < 10000 && static_cast<int>(code) != 0) {
+        return std::strerror(static_cast<int>(code));
+    }
+    auto iter = codeMaps.find(code);
+    if (iter == codeMaps.end()) {
+        return "unknown error";
+    }
+    return iter->second;
 }
 
 seastar::sstring ToJsonString(ErrCode code, const std::string& reason) {
-  std::ostringstream oss;
-  oss << "{\"code\": " << static_cast<int>(code) << ", \"message\": \""
-      << (reason == "" ? GetReason(code) : reason) << "\"}";
-  return oss.str();
+    std::ostringstream oss;
+    oss << "{\"code\": " << static_cast<int>(code) << ", \"message\": \""
+        << (reason == "" ? GetReason(code) : reason) << "\"}";
+    return oss.str();
 }
 
 }  // namespace snail
