@@ -19,9 +19,9 @@ namespace stream {
 const size_t kMagic = 0x69616e73;
 const size_t kVersion = 1;
 const size_t kChunkSize = 4 << 20;
-const size_t kChunkDataSize = kChunkSize - 256;
-const size_t kBlockSize = 65536;
-const size_t kBlockDataSize = 65532;
+const size_t kChunkDataSize = kChunkSize - 512;
+const size_t kBlockSize = 32 << 10;
+const size_t kBlockDataSize = 32764;
 const size_t kMemoryAlignment = 4096;
 const int kBlockCount = kChunkSize / kBlockSize;
 
@@ -60,7 +60,7 @@ seastar::future<Status<>> Store::WriteOneBlock(ExtentID id, uint64_t offset,
     uint32_t sector_size = super_block_.sector_size;
 
     auto chunk = extern_ptr->chunks.back();
-    size_t chunk_free_size = kChunkSize - ChunkLen(chunk);
+    size_t chunk_free_size = kChunkSize - ChunkPhyLen(chunk);
     if (chunk_free_size == 0) {
         // TODO alloc block
     }
