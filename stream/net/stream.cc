@@ -7,14 +7,14 @@
 namespace snail {
 namespace net {
 
-Stream::Stream(uint32_t id, uint32_t frame_size, SessionPtr sess)
+Stream::Stream(uint32_t id, uint16_t frame_size, SessionPtr sess)
     : id_(id), frame_size_(frame_size), sess_(sess) {
     buffer_size_ = 0;
     has_fin_ = false;
     die_ = false;
 }
 
-StreamPtr Stream::make_stream(uint32_t id, uint32_t frame_size,
+StreamPtr Stream::make_stream(uint32_t id, uint16_t frame_size,
                               SessionPtr sess) {
     StreamPtr stream = seastar::make_lw_shared<Stream>(id, frame_size, sess);
     return stream;
@@ -25,11 +25,11 @@ seastar::future<Status<seastar::temporary_buffer<char>>> Stream::ReadFrame(
     Status<seastar::temporary_buffer<char>> s;
     for (;;) {
         if (!buffers_.empty()) {
-            auto b = std::move(buffers_.front());
-            buffers_.pop();
+            auto &b = buffers_.front();
             buffer_size_ -= b.size();
             sess_->ReturnTokens(b.size());
             s.SetValue(std::move(b));
+            buffers_.pop();
             break;
         }
         auto st = co_await WaitRead(timeout);
@@ -59,8 +59,7 @@ seastar::future<Status<>> Stream::WaitRead(int timeout) {
     }
     if (timeout < 0) {
         co_await r_cv_.wait();
-    } else if (timeout == 0) {
-    } else {
+    } else if (timeout > 0) {
         try {
             co_await r_cv_.wait(std::chrono::milliseconds(timeout));
         } catch (seastar::condition_variable_timed_out &e) {
@@ -86,7 +85,7 @@ seastar::future<Status<>> Stream::WaitRead(int timeout) {
 
 void Stream::PushData(seastar::temporary_buffer<char> data) {
     buffer_size_ += data.size();
-    buffers_.push(std::move(data));
+    buffers_.emplace(std::move(data));
     NotifyReadEvent();
 }
 

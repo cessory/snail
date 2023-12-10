@@ -1,5 +1,7 @@
 #include "session.h"
 
+#include <limits.h>
+
 #include <seastar/core/coroutine.hh>
 #include <seastar/util/defer.hh>
 
@@ -14,10 +16,9 @@ Session::Session(const Option &opt, ConnectionPtr conn, bool client)
     : opt_(opt),
       conn_(std::move(conn)),
       next_id_(0),
-      sequence_(0),
-      bucket_sem_(opt.max_receive_buffer),
       die_(false),
-      accept_sem_(default_accept_backlog) {}
+      accept_sem_(default_accept_backlog),
+      tokens_(opt.max_receive_buffer) {}
 
 SessionPtr Session::make_session(const Option &opt, ConnectionPtr conn,
                                  bool client) {
@@ -33,24 +34,27 @@ SessionPtr Session::make_session(const Option &opt, ConnectionPtr conn,
 seastar::future<> Session::RecvLoop() {
     auto ptr = shared_from_this();
     auto defer = seastar::defer([this] {
-        std::cout << "exit recv loop****************" << std::endl;
         accept_cv_.signal();
         w_cv_.signal();
     });
     while (!die_) {
+        if (tokens_ < 0) {
+            co_await token_cv_.wait();
+            if (die_ || !status_.OK()) {
+                break;
+            }
+        }
         auto s = co_await conn_->ReadExactly(
             static_cast<size_t>(STREAM_HEADER_SIZE));
         if (!s.OK()) {
-            std::cout << "connection read error: " << s.Reason() << std::endl;
-            status_.Set(s.Code(), s.Reason());
+            SetStatus(s.Code(), s.Reason());
             co_await conn_->Close();
             CloseAllStreams();
             break;
         }
         auto hdr = std::move(s.Value());
         if (hdr.empty()) {
-            status_.Set(ECONNABORTED);
-            std::cout << "connection abort" << std::endl;
+            SetStatus(static_cast<ErrCode>(ECONNABORTED));
             co_await conn_->Close();
             CloseAllStreams();
             break;
@@ -60,7 +64,7 @@ seastar::future<> Session::RecvLoop() {
         uint16_t len = LittleEndian::Uint16(hdr.get() + 2);
         uint32_t sid = LittleEndian::Uint32(hdr.get() + 4);
         if (ver != 1) {
-            status_.Set(ECONNABORTED);
+            SetStatus(static_cast<ErrCode>(ECONNABORTED));
             co_await conn_->Close();
             CloseAllStreams();
             break;
@@ -71,19 +75,14 @@ seastar::future<> Session::RecvLoop() {
             case CmdType::SYN: {
                 auto it = streams_.find(sid);
                 if (it == streams_.end()) {
-                    StreamPtr stream = seastar::make_lw_shared<Stream>(
+                    StreamPtr stream = Stream::make_stream(
                         sid, (uint32_t)opt_.max_frame_size, shared_from_this());
                     streams_[sid] = stream;
                     try {
-                        std::cout << "accept stream=" << sid << std::endl;
                         co_await accept_sem_.wait();
                     } catch (std::exception &e) {
-                        std::cout << "accept stream=" << sid << " exception"
-                                  << std::endl;
                         co_return;
                     }
-                    std::cout << "accept stream=" << sid << " in queue"
-                              << std::endl;
                     accept_q_.push(stream);
                     accept_cv_.signal();
                 }
@@ -102,16 +101,13 @@ seastar::future<> Session::RecvLoop() {
                     auto s =
                         co_await conn_->ReadExactly(static_cast<size_t>(len));
                     if (!s.OK()) {
-                        std::cout << "connection read error: " << s.Reason()
-                                  << std::endl;
-                        status_.Set(s.Code(), s.Reason());
+                        SetStatus(s.Code(), s.Reason());
                         co_await conn_->Close();
                         CloseAllStreams();
                         co_return;
                     }
                     if (s.Value().empty()) {
-                        std::cout << "connection abort" << std::endl;
-                        status_.Set(ECONNABORTED);
+                        SetStatus(static_cast<ErrCode>(ECONNABORTED));
                         co_await conn_->Close();
                         CloseAllStreams();
                         co_return;
@@ -119,24 +115,14 @@ seastar::future<> Session::RecvLoop() {
                     auto it = streams_.find(sid);
                     if (it != streams_.end()) {
                         auto stream = it->second;
-                        try {
-                            std::cout << "begin bucket wait len=" << len
-                                      << " sid=" << sid << std::endl;
-                            co_await bucket_sem_.wait(len);
-                        } catch (std::exception &e) {
-                            std::cout << "end bucket wait exception len=" << len
-                                      << " sid=" << sid << std::endl;
-                            co_return;
-                        }
-                        std::cout << "end bucket wait len=" << len
-                                  << " sid=" << sid << std::endl;
                         stream->PushData(std::move(s.Value()));
+                        tokens_ -= len;
                     }
                 }
                 break;
             case CmdType::UPD:
             default:
-                status_.Set(EINVAL);
+                SetStatus(static_cast<ErrCode>(EINVAL));
                 co_await conn_->Close();
                 CloseAllStreams();
                 co_return;
@@ -146,14 +132,41 @@ seastar::future<> Session::RecvLoop() {
 }
 
 seastar::future<> Session::SendLoop() {
+    static uint32_t max_packet_num = IOV_MAX;
     auto ptr = shared_from_this();
+    auto defer = seastar::defer([this] {
+        accept_cv_.signal();
+        accept_sem_.broken();
+        token_cv_.signal();
+        SetStatus(static_cast<ErrCode>(EPIPE));
+        for (int i = 0; i < 2; i++) {
+            while (!write_q_[i].empty()) {
+                auto req = write_q_[i].front();
+                write_q_[i].pop();
+                if (req->pr.has_value()) {
+                    req->pr.value().set_value(status_);
+                } else {
+                    delete req;
+                }
+            }
+        }
+    });
     while (!die_ && status_.OK()) {
         Status<> s;
         std::queue<Session::write_request *> sent_q;
         seastar::net::packet packet;
+        uint32_t packet_n = 0;
         for (int i = 0; i < write_q_.size(); i++) {
-            while (!write_q_[i].empty()) {
+            while (!write_q_[i].empty() && packet_n < max_packet_num) {
                 auto req = write_q_[i].front();
+                if (req->frame.data.size() > 0) {
+                    packet_n += 2;
+                } else {
+                    packet_n += 1;
+                }
+                if (packet_n > max_packet_num) {
+                    break;
+                }
                 write_q_[i].pop();
                 sent_q.push(req);
                 seastar::temporary_buffer<char> hdr(STREAM_HEADER_SIZE);
@@ -187,23 +200,31 @@ seastar::future<> Session::SendLoop() {
             }
 
             if (!s.OK()) {
-                status_ = s;
+                SetStatus(s);
                 co_await conn_->Close();
                 CloseAllStreams();
                 break;
             }
         }
 
-        co_await w_cv_.wait();
+        if (write_q_[0].empty() && write_q_[1].empty()) {
+            co_await w_cv_.wait();
+        }
     }
 
     co_return;
 }
 
 void Session::StartKeepalive() {
-    if (keepalive_timer_ == nullptr) {
-        keepalive_timer_ = new seastar::timer<seastar::steady_clock_type>(
-            [this]() { WritePing(); });
+    keepalive_timer_.set_callback([this]() { WritePing(); });
+    keepalive_timer_.rearm_periodic(
+        std::chrono::seconds(opt_.keep_alive_interval));
+}
+
+void Session::ReturnTokens(uint32_t n) {
+    tokens_ += n;
+    if (tokens_ > 0) {
+        token_cv_.signal();
     }
 }
 
@@ -223,10 +244,9 @@ seastar::future<Status<>> Session::WriteFrameInternal(Frame f,
 
     req->classid = classid;
     req->frame = std::move(f);
-    req->seq = ++sequence_;
     req->pr = seastar::promise<Status<>>();
 
-    write_q_[static_cast<int>(classid)].push(req);
+    write_q_[static_cast<int>(classid)].emplace(req);
     w_cv_.signal();
     s = co_await req->pr.value().get_future();
     delete req;
@@ -246,7 +266,6 @@ void Session::WritePing() {
     req->frame.ver = opt_.version;
     req->frame.cmd = CmdType::NOP;
     req->frame.sid = 0;
-    req->seq = ++sequence_;
 
     write_q_[static_cast<int>(ClassID::CTRL)].push(req);
     w_cv_.signal();
@@ -301,9 +320,9 @@ seastar::future<Status<StreamPtr>> Session::AcceptStream() {
             s.Set(status_.Code(), status_.Reason());
             break;
         }
-        std::cout << "begin accept stream" << std::endl;
-        co_await accept_cv_.wait();
-        std::cout << "end accept stream" << std::endl;
+        if (accept_q_.empty()) {
+            co_await accept_cv_.wait();
+        }
 
         if (die_) {
             s.Set(EPIPE);
@@ -330,13 +349,9 @@ seastar::future<> Session::Close() {
         die_ = true;
         w_cv_.signal();
         accept_sem_.broken();
-        bucket_sem_.broken();
+        token_cv_.signal();
         accept_cv_.signal();
-        if (keepalive_timer_) {
-            keepalive_timer_->cancel();
-            delete keepalive_timer_;
-            keepalive_timer_ = nullptr;
-        }
+        keepalive_timer_.cancel();
         co_await conn_->Close();
         co_await send_fu_.value().then([] {});
         co_await recv_fu_.value().then([] {});

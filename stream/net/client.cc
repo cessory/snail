@@ -43,7 +43,7 @@ seastar::future<> test_client(uint16_t port) {
         auto fu = test_stream(s.Value());
         fu_vec.emplace_back(std::move(fu));
     }
-    std::cout << "create 10000 streams" << std::endl;
+    std::cout << "has " << fu_vec.size() << " streams" << std::endl;
     co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
     co_await sess->Close();
     co_return;
