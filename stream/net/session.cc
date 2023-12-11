@@ -83,7 +83,7 @@ seastar::future<> Session::RecvLoop() {
                     } catch (std::exception &e) {
                         co_return;
                     }
-                    accept_q_.push(stream);
+                    accept_q_.emplace(stream);
                     accept_cv_.signal();
                 }
                 break;
@@ -168,7 +168,7 @@ seastar::future<> Session::SendLoop() {
                     break;
                 }
                 write_q_[i].pop();
-                sent_q.push(req);
+                sent_q.emplace(req);
                 seastar::temporary_buffer<char> hdr(STREAM_HEADER_SIZE);
                 *hdr.get_write() = req->frame.ver;
                 *(hdr.get_write() + 1) = req->frame.cmd;
@@ -267,7 +267,7 @@ void Session::WritePing() {
     req->frame.cmd = CmdType::NOP;
     req->frame.sid = 0;
 
-    write_q_[static_cast<int>(ClassID::CTRL)].push(req);
+    write_q_[static_cast<int>(ClassID::CTRL)].emplace(req);
     w_cv_.signal();
     return;
 }

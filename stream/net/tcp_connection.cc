@@ -8,7 +8,7 @@ TcpConnection::TcpConnection(seastar::connected_socket socket,
                              seastar::socket_address remote)
     : socket_(std::move(socket)), remote_address_(remote) {
     socket_.set_nodelay(true);
-    out_ = socket_.output();
+    out_ = socket_.output(65536);
     in_ = socket_.input();
     closed_ = false;
 }

@@ -34,7 +34,7 @@ seastar::future<> test_client(uint16_t port) {
         snail::net::Session::make_session(snail::net::Option(), conn, true);
 
     std::vector<seastar::future<>> fu_vec;
-    for (int i = 0; i < 10000; i++) {
+    for (int i = 0; i < 1; i++) {
         auto s = co_await sess->OpenStream();
         if (!s.OK()) {
             std::cout << "open stream error: " << s.Reason() << std::endl;
@@ -53,6 +53,8 @@ int main(int argc, char** argv) {
     boost::program_options::options_description desc;
     desc.add_options()("help,h", "show help message");
     desc.add_options()("port", bpo::value<uint16_t>(), "Server port");
+    desc.add_options()("cpu", bpo::value<unsigned>()->default_value(1),
+                       "bind cpu");
 
     bpo::variables_map vm;
     try {
@@ -72,6 +74,7 @@ int main(int argc, char** argv) {
     seastar::app_template::seastar_options opts;
     // opts.reactor_opts.poll_mode.set_value();
     opts.smp_opts.smp.set_value(1);
+    opts.smp_opts.cpuset.set_value({vm["cpu"].as<unsigned>()});
     opts.auto_handle_sigint_sigterm = false;
     seastar::app_template app(std::move(opts));
     char* args[1] = {argv[0]};
