@@ -15,7 +15,7 @@ static const size_t default_accept_backlog = 1024;
 Session::Session(const Option &opt, ConnectionPtr conn, bool client)
     : opt_(opt),
       conn_(std::move(conn)),
-      next_id_(0),
+      next_id_((client ? 1 : 0)),
       die_(false),
       accept_sem_(default_accept_backlog),
       tokens_(opt.max_receive_buffer) {}

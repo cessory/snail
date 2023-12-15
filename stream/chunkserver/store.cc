@@ -22,7 +22,6 @@ const size_t kChunkSize = 4 << 20;
 const size_t kChunkDataSize = kChunkSize - 512;
 const size_t kBlockSize = 32 << 10;
 const size_t kBlockDataSize = 32764;
-const size_t kMemoryAlignment = 4096;
 const int kBlockCount = kChunkSize / kBlockSize;
 
 // include the last crc len
