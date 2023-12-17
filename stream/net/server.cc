@@ -3,9 +3,11 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/core/when_all.hh>
 
 #include "session.h"
 #include "tcp_connection.h"
+#include "util/status.h"
 
 namespace bpo = boost::program_options;
 
@@ -14,6 +16,7 @@ static size_t recv_bytes = 0;
 seastar::future<> handle_stream(snail::net::StreamPtr stream) {
     for (;;) {
         auto s = co_await stream->ReadFrame();
+
         if (!s.OK()) {
             std::cout << "sid=" << stream->ID()
                       << " read frame error: " << s.Reason() << std::endl;
@@ -53,7 +56,7 @@ seastar::future<> test_server(uint16_t port) {
         auto conn = snail::net::TcpConnection::make_connection(
             std::move(ar.connection), ar.remote_address);
         snail::net::Option opt;
-        opt.keep_alive_disabled = true;
+        opt.version = 2;
         opt.max_receive_buffer = 128 << 20;
         auto sess = snail::net::Session::make_session(opt, conn, false);
         (void)handle_sess(sess);

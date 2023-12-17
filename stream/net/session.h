@@ -18,11 +18,12 @@ namespace snail {
 namespace net {
 
 struct Option {
-    int version = 1;
-    bool keep_alive_disabled = false;
+    uint8_t version = 1;
+    bool keep_alive_enable = false;
     int keep_alive_interval = 10;  // unit: s
     uint16_t max_frame_size = 65535;
-    int max_receive_buffer = 67108864;  // 64M
+    uint32_t max_receive_buffer = 67108864;  // 64M
+    uint32_t max_stream_buffer = 262144;     // 256 K
 };
 
 class Session : public seastar::enable_lw_shared_from_this<Session> {

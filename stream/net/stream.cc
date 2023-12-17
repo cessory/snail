@@ -2,21 +2,23 @@
 
 #include <seastar/core/coroutine.hh>
 
+#include "byteorder.h"
 #include "session.h"
 
 namespace snail {
 namespace net {
 
-Stream::Stream(uint32_t id, uint16_t frame_size, SessionPtr sess)
-    : id_(id), frame_size_(frame_size), sess_(sess) {
-    buffer_size_ = 0;
-    has_fin_ = false;
-    die_ = false;
+static constexpr uint32_t kInitialWnd = 262144;
+
+Stream::Stream(uint32_t id, uint8_t ver, uint16_t frame_size, SessionPtr sess)
+    : id_(id), ver_(ver), frame_size_(frame_size), sess_(sess) {
+    remote_wnd_ = kInitialWnd;
 }
 
-StreamPtr Stream::make_stream(uint32_t id, uint16_t frame_size,
+StreamPtr Stream::make_stream(uint32_t id, uint8_t ver, uint16_t frame_size,
                               SessionPtr sess) {
-    StreamPtr stream = seastar::make_lw_shared<Stream>(id, frame_size, sess);
+    StreamPtr stream =
+        seastar::make_lw_shared<Stream>(id, ver, frame_size, sess);
     return stream;
 }
 
@@ -26,10 +28,24 @@ seastar::future<Status<seastar::temporary_buffer<char>>> Stream::ReadFrame(
     for (;;) {
         if (!buffers_.empty()) {
             auto &b = buffers_.front();
-            buffer_size_ -= b.size();
-            sess_->ReturnTokens(b.size());
+            uint32_t n = static_cast<uint32_t>(b.size());
+            buffer_size_ -= n;
+            sess_->ReturnTokens(n);
             s.SetValue(std::move(b));
             buffers_.pop();
+            if (ver_ == 2) {
+                recv_bytes_ += n;
+                incr_ += n;
+                if (incr_ >= sess_->opt_.max_stream_buffer / 2 ||
+                    recv_bytes_ == n) {
+                    incr_ = 0;
+                    auto st = co_await SendWindowUpdate(recv_bytes_);
+                    if (!st.OK()) {
+                        s.Set(st.Code(), st.Reason());
+                        co_return s;
+                    }
+                }
+            }
             break;
         }
         auto st = co_await WaitRead(timeout);
@@ -86,31 +102,58 @@ seastar::future<Status<>> Stream::WaitRead(int timeout) {
 void Stream::PushData(seastar::temporary_buffer<char> data) {
     buffer_size_ += data.size();
     buffers_.emplace(std::move(data));
-    NotifyReadEvent();
+    r_cv_.signal();
 }
 
 void Stream::Fin() {
     has_fin_ = true;
-    NotifyReadEvent();
+    r_cv_.signal();
+    wnd_cv_.broadcast();
 }
 
-void Stream::NotifyReadEvent() { r_cv_.signal(); }
+seastar::future<Status<>> Stream::SendWindowUpdate(uint32_t consumed) {
+    Frame f;
+    f.ver = ver_;
+    f.cmd = CmdType::UPD;
+    f.sid = id_;
+    f.data = seastar::temporary_buffer<char>(8);
+    LittleEndian::PutUint32(f.data.get_write(), consumed);
+    LittleEndian::PutUint32(f.data.get_write() + 4,
+                            sess_->opt_.max_stream_buffer);
+    return sess_->WriteFrameInternal(std::move(f), Session::ClassID::DATA);
+}
 
 seastar::future<Status<>> Stream::WriteFrame(char *b, int n) {
     Status<> s;
 
-    if (n > frame_size_) {
-        s.Set(EMSGSIZE);
-        co_return s;
-    }
-
-    if (die_) {
+    if (die_ || has_fin_) {
         s.Set(EPIPE);
         co_return s;
     }
 
+    if (n > frame_size_ || n < 0) {
+        s.Set(EMSGSIZE);
+        co_return s;
+    } else if (n == 0) {
+        co_return s;
+    }
+
+    if (ver_ == 2) {
+        int32_t inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
+        int32_t win = static_cast<int32_t>(remote_wnd_) - inflight;
+        while (inflight < 0 || win <= 0) {
+            co_await wnd_cv_.wait();
+            if (die_ || has_fin_) {
+                s.Set(EPIPE);
+                co_return s;
+            }
+            inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
+            win = static_cast<int32_t>(remote_wnd_) - inflight;
+        }
+    }
+    sent_bytes_ += n;
     Frame frame;
-    frame.ver = sess_->opt_.version;
+    frame.ver = ver_;
     frame.cmd = CmdType::PSH;
     frame.sid = id_;
     frame.data = seastar::temporary_buffer<char>(b, n, seastar::deleter());
@@ -119,10 +162,17 @@ seastar::future<Status<>> Stream::WriteFrame(char *b, int n) {
     co_return s;
 }
 
+void Stream::Update(uint32_t consumed, uint32_t window) {
+    remote_consumed_ = consumed;
+    remote_wnd_ = window;
+    wnd_cv_.broadcast();
+}
+
 void Stream::SessionClose() {
     if (!die_) {
         die_ = true;
         r_cv_.signal();
+        wnd_cv_.broadcast();
     }
 }
 
@@ -130,8 +180,9 @@ seastar::future<> Stream::Close() {
     if (!die_) {
         die_ = true;
         r_cv_.signal();
+        wnd_cv_.broadcast();
         Frame frame;
-        frame.ver = sess_->opt_.version;
+        frame.ver = ver_;
         frame.cmd = CmdType::FIN;
         frame.sid = id_;
         co_await sess_->WriteFrameInternal(std::move(frame),

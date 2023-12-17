@@ -21,13 +21,21 @@ using StreamPtr = seastar::lw_shared_ptr<Stream>;
 
 class Stream {
     uint32_t id_;
+    uint8_t ver_;
     uint16_t frame_size_;
     SessionPtr sess_;
     std::queue<seastar::temporary_buffer<char>> buffers_;
-    size_t buffer_size_;
+    size_t buffer_size_ = 0;
     seastar::condition_variable r_cv_;
-    bool has_fin_;
-    bool die_;
+    bool has_fin_ = false;
+    bool die_ = false;
+
+    uint32_t recv_bytes_ = 0;
+    uint32_t sent_bytes_ = 0;
+    uint32_t incr_ = 0;
+    uint32_t remote_consumed_ = 0;
+    uint32_t remote_wnd_;
+    seastar::condition_variable wnd_cv_;
 
     friend class Session;
 
@@ -40,19 +48,22 @@ class Stream {
 
     void Fin();
 
-    void NotifyReadEvent();
+    seastar::future<Status<>> SendWindowUpdate(uint32_t consumed);
 
     void SessionClose();
 
+    void Update(uint32_t consumed, uint32_t window);
+
    public:
-    explicit Stream(uint32_t id, uint16_t frame_size, SessionPtr sess);
+    explicit Stream(uint32_t id, uint8_t ver, uint16_t frame_size,
+                    SessionPtr sess);
 
     ~Stream() {
         sess_.release();
         std::cout << "stream id=" << id_ << " deconstructer" << std::endl;
     }
 
-    static StreamPtr make_stream(uint32_t id, uint16_t frame_size,
+    static StreamPtr make_stream(uint32_t id, uint8_t ver, uint16_t frame_size,
                                  SessionPtr sess);
 
     uint32_t ID() const { return id_; }

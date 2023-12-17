@@ -25,9 +25,7 @@ SessionPtr Session::make_session(const Option &opt, ConnectionPtr conn,
     SessionPtr sess_ptr = seastar::make_lw_shared<Session>(opt, conn, client);
     sess_ptr->recv_fu_ = sess_ptr->RecvLoop();
     sess_ptr->send_fu_ = sess_ptr->SendLoop();
-    if (!opt.keep_alive_disabled) {
-        sess_ptr->StartKeepalive();
-    }
+    sess_ptr->StartKeepalive();
     return sess_ptr;
 }
 
@@ -63,7 +61,7 @@ seastar::future<> Session::RecvLoop() {
         CmdType cmd = static_cast<CmdType>(hdr[1]);
         uint16_t len = LittleEndian::Uint16(hdr.get() + 2);
         uint32_t sid = LittleEndian::Uint32(hdr.get() + 4);
-        if (ver != 1) {
+        if (ver != 1 && ver != 2) {
             SetStatus(static_cast<ErrCode>(ECONNABORTED));
             co_await conn_->Close();
             CloseAllStreams();
@@ -76,7 +74,8 @@ seastar::future<> Session::RecvLoop() {
                 auto it = streams_.find(sid);
                 if (it == streams_.end()) {
                     StreamPtr stream = Stream::make_stream(
-                        sid, (uint32_t)opt_.max_frame_size, shared_from_this());
+                        sid, ver, (uint32_t)opt_.max_frame_size,
+                        shared_from_this());
                     streams_[sid] = stream;
                     try {
                         co_await accept_sem_.wait();
@@ -121,6 +120,37 @@ seastar::future<> Session::RecvLoop() {
                 }
                 break;
             case CmdType::UPD:
+                if (len != 8) {
+                    SetStatus(static_cast<ErrCode>(EINVAL));
+                    co_await conn_->Close();
+                    CloseAllStreams();
+                    co_return;
+                } else {
+                    auto s =
+                        co_await conn_->ReadExactly(static_cast<size_t>(len));
+                    if (!s.OK()) {
+                        SetStatus(s.Code(), s.Reason());
+                        co_await conn_->Close();
+                        CloseAllStreams();
+                        co_return;
+                    }
+                    if (s.Value().empty()) {
+                        SetStatus(static_cast<ErrCode>(ECONNABORTED));
+                        co_await conn_->Close();
+                        CloseAllStreams();
+                        co_return;
+                    }
+                    auto it = streams_.find(sid);
+                    if (it != streams_.end()) {
+                        auto stream = it->second;
+                        uint32_t consumed =
+                            LittleEndian::Uint32(s.Value().get());
+                        uint32_t window =
+                            LittleEndian::Uint32(s.Value().get() + 4);
+                        stream->Update(consumed, window);
+                    }
+                }
+                break;
             default:
                 SetStatus(static_cast<ErrCode>(EINVAL));
                 co_await conn_->Close();
@@ -216,9 +246,11 @@ seastar::future<> Session::SendLoop() {
 }
 
 void Session::StartKeepalive() {
-    keepalive_timer_.set_callback([this]() { WritePing(); });
-    keepalive_timer_.rearm_periodic(
-        std::chrono::seconds(opt_.keep_alive_interval));
+    if (opt_.keep_alive_enable) {
+        keepalive_timer_.set_callback([this]() { WritePing(); });
+        keepalive_timer_.rearm_periodic(
+            std::chrono::seconds(opt_.keep_alive_interval));
+    }
 }
 
 void Session::ReturnTokens(uint32_t n) {
@@ -285,8 +317,8 @@ seastar::future<Status<StreamPtr>> Session::OpenStream() {
     }
     next_id_ = id;
 
-    auto stream = Stream::make_stream(id, (uint32_t)opt_.max_frame_size,
-                                      shared_from_this());
+    auto stream = Stream::make_stream(
+        id, opt_.version, (uint32_t)opt_.max_frame_size, shared_from_this());
     Frame frame;
     frame.ver = opt_.version;
     frame.cmd = CmdType::SYN;

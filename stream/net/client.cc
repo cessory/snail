@@ -11,11 +11,25 @@
 namespace bpo = boost::program_options;
 
 seastar::future<> test_stream(snail::net::StreamPtr stream) {
-    seastar::temporary_buffer<char> data(4096);
+    seastar::temporary_buffer<char> data(32 << 10);
     for (;;) {
-        auto st = co_await stream->WriteFrame(data.get_write(), data.size());
-        if (!st.OK()) {
-            std::cout << "write frame error: " << st.Reason() << std::endl;
+        std::vector<seastar::future<snail::Status<>>> fu_vec;
+        for (int i = 0; i < 8; i++) {
+            auto ft = stream->WriteFrame(data.get_write(), data.size());
+            fu_vec.emplace_back(std::move(ft));
+        }
+        auto res_vec =
+            co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
+        bool has_error = false;
+        for (int i = 0; i < 8; i++) {
+            if (!res_vec[i].OK()) {
+                std::cout << "write frame error: " << res_vec[i].Reason()
+                          << std::endl;
+                has_error = true;
+                break;
+            }
+        }
+        if (has_error) {
             break;
         }
     }
@@ -30,8 +44,9 @@ seastar::future<> test_client(uint16_t port) {
     auto conn =
         snail::net::TcpConnection::make_connection(std::move(socket), sa);
 
-    auto sess =
-        snail::net::Session::make_session(snail::net::Option(), conn, true);
+    snail::net::Option opt;
+    opt.version = 2;
+    auto sess = snail::net::Session::make_session(opt, conn, true);
 
     std::vector<seastar::future<>> fu_vec;
     for (int i = 0; i < 1; i++) {
