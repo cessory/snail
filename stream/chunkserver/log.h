@@ -15,8 +15,7 @@ class Log {
     uint64_t version_ = 0;
     int current_log_pt_ = LOGA_PT;
     uint64_t offset_;  // current offset
-    seastar::temporary_buffer<char> mem_;
-    size_t mem_size_ = 0;
+
     std::map<uint32_t, ChunkEntry> chunk_mem_;
     std::map<uint32_t, ChunkEntry> immu_chunk_mem_;
     std::map<uint32_t, ExtentEntry> extent_mem_;
@@ -25,6 +24,11 @@ class Log {
     struct worker_item {
         seastar::promise<Status<>> pr;
         std::variant<ExtentEntry, ChunkEntry> entry;
+        size_t Size() const {
+            return entry.index() == 0 ? kExtentEntrySize : kChunkEntrySize;
+        }
+
+        void MarshalTo(uint64_t ver, char *b);
     };
 
     std::queue<worker_item *> queue_;
@@ -34,10 +38,12 @@ class Log {
 
     seastar::future<> LoopRun();
 
-    void ResetMem();
-    seastar::future<Status<>> Flush();
-    seastar::future<Status<>> BackgroundFlush();
-    void AppendToMem(worker_item *item);
+    seastar::future<Status<>> SaveImmuChunks();
+    seastar::future<Status<>> SaveImmuExtents();
+
+    seastar::future<Status<>> BackgroundFlush(uint64_t ver,
+                                              uint64_t header_offset);
+
     void UpdateMem(worker_item *item);
 
    public:

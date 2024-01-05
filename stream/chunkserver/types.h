@@ -7,6 +7,8 @@ constexpr int kChunkEntrySize = 16;
 constexpr int kExtentEntrySize = 24;
 constexpr size_t kMemoryAlignment = 4096;
 
+using TmpBuffer = seastar::temporary_buffer<char>;
+
 struct ExtentID {
     uint64_t hi = 0;
     uint64_t lo = 0;
@@ -75,6 +77,14 @@ struct ExtentEntry {
 
     int MarshalTo(char* b) const;
 };
+
+struct Extent : public ExtentEntry {
+    size_t len;
+    std::vector<ChunkEntry> chunks;
+    seastar::shared_mutex mu;
+};
+
+using ExtentPtr = seastar::lw_shared_ptr<Extent>;
 
 }  // namespace stream
 }  // namespace snail
