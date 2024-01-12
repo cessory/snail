@@ -6,6 +6,9 @@ namespace stream {
 constexpr int kChunkEntrySize = 16;
 constexpr int kExtentEntrySize = 24;
 constexpr size_t kMemoryAlignment = 4096;
+constexpr size_t kMemoryAlignmentMask = 4095;
+constexpr size_t kSectorSize = 512;
+constexpr size_t kSectorSizeMask = 511;
 
 using TmpBuffer = seastar::temporary_buffer<char>;
 
@@ -67,6 +70,36 @@ struct ChunkEntry {
     uint32_t len;  // data len, exclude crc
     uint32_t crc;
 
+    ChunkEntry() {
+        index = 0;
+        next = -1;
+        len = 0;
+        crc = 0;
+    }
+
+    ChunkEntry(uint32_t idx) {
+        index = idx;
+        next = -1;
+        len = 0;
+        crc = 0;
+    }
+
+    ChunkEntry(const ChunkEntry& x) {
+        index = x.index;
+        next = x.index;
+        len = x.len;
+        crc = x.crc;
+    }
+
+    ChunkEntry& operator=(const ChunkEntry& x) {
+        if (this != &x) {
+            index = x.index;
+            next = x.index;
+            len = x.len;
+            crc = x.crc;
+        }
+        return *this;
+    }
     int MarshalTo(char* b) const;
 };
 

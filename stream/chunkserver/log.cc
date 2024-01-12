@@ -10,7 +10,7 @@ namespace stream {
 static constexpr int kHeaderSize = 4 + 8 + 1;  // crc + ver + flag
 static constexpr int kRecordHeaderSize =
     4 + 8 + 2 + 1;  // crc + ver + len + type
-static constexpr int kMaxMemSize = 32768;
+static constexpr int kMaxMemSize = 8192;
 
 // log format
 // |   header    |             data                         |
@@ -29,7 +29,7 @@ static void LogHeaderMarshalTo(uint64_t ver, uint8_t flag, char *b) {
 }
 
 Log::Log(DevicePtr dev_ptr, const SuperBlock &super_block)
-    : dev_ptr_(dev_ptr), super_(super_block), background_sem_(1) {
+    : dev_ptr_(dev_ptr), super_(super_block) {
     offset_ = super_.pt[LOGA_PT].start;
 }
 
@@ -56,37 +56,50 @@ void Log::worker_item::MarshalTo(uint64_t ver, char *b) {
     BigEndian::PutUint32(b, crc);
 }
 
-seastar::future<Status<>> Log::Recover(
+seastar::future<Status<>> Log::Init(
     seastar::noncopyable_function<void(const ExtentEntry &)> &&f1,
     seastar::noncopyable_function<void(const ChunkEntry &)> &&f2) {
+    Status<> s;
+    if (init_) {
+        s.Set(EALREADY);
+        co_return s;
+    }
+    init_ = true;
     auto buf =
         seastar::temporary_buffer<char>::aligned(kMemoryAlignment, kMaxMemSize);
     uint32_t sector_size = super_.sector_size;
-    Status<> s;
 
     uint64_t ver[2];
     int index[2] = {0, 1};
+    uint8_t flags[2] = {0, 0};
     for (int i = 0; i < 2; i++) {
         s = dev_ptr_->Read(super_.pt[LOGA_PT + i].start, buf.get_write(),
                            sector_size);
         if (!s.OK()) {
             co_return s;
         }
-        if (crc32_gzip_refl(0, buf.get() + 4, kHeaderSize - 4) !=
-            BigEndian::Uint32(buf.get())) {
+        uint32_t crc = BigEndian::Uint32(buf.get());
+        ver[i] = BigEndian::Uint64(buf.get() + 4);
+        flags[i] = *(buf.get() + 12);
+        if (crc == 0 && ver[i] == 0) {
+            continue;
+        }
+        if (crc32_gzip_refl(0, buf.get() + 4, kHeaderSize - 4) != crc) {
             co_return Status<>(ErrCode::ErrInvalidChecksum);
         }
-        ver[i] = BigEndian::Uint64(buf.get() + 4);
     }
     if (ver[0] > ver[1]) {
         index[0] = 1;
         index[1] = 0;
     }
     for (int i = 0; i < 2; i++) {
-        int pt_n = (LOGA_PT + index[i]) % LOGA_PT + LOGA_PT;
+        int pt_n = LOGA_PT + index[i];
         uint64_t offset = super_.pt[pt_n].start;
         version_ = ver[index[i]];
-        offset_ = offset;
+
+        if (version_ == 0 || flags[index[i]] != 0) {
+            continue;
+        }
 
         while (offset < super_.pt[pt_n].start + super_.pt[pt_n].size) {
             auto s =
@@ -97,57 +110,79 @@ seastar::future<Status<>> Log::Recover(
             const char *p = buf.get();
             if (offset == super_.pt[pt_n].start) {
                 p += sector_size;
-                offset_ += sector_size;
             }
 
             bool break_loop = false;
-            for (; p < buf.get() + buf.size(); p += sector_size) {
-                uint32_t crc = BigEndian::Uint32(p);
-                uint64_t version = BigEndian::Uint64(p + 4);
-                uint16_t len = BigEndian::Uint16(p + 12);
-                EntryType type = static_cast<EntryType>(*(p + 14));
-                if (len > sector_size - 6 || version != version_) {
-                    break_loop = true;
-                    break;
-                }
-                if (crc32_gzip_refl(0, p + 4, kRecordHeaderSize + len - 4) !=
-                    crc) {
-                    break_loop = true;
-                    break;
-                }
-                switch (type) {
-                    case EntryType::Chunk: {
-                        ChunkEntry ent;
-                        ent.Unmarshal(p + kRecordHeaderSize);
-                        immu_chunk_mem_[ent.index] = ent;
-                        f2(ent);
+            for (; p < buf.get() + buf.size() && !break_loop;
+                 p += sector_size) {
+                const char *start = p;
+                const char *end = p + sector_size;
+                while (start < end && !break_loop) {
+                    if (start + kRecordHeaderSize > end) {
                         break;
                     }
-                    case EntryType::Extent: {
-                        ExtentEntry ent;
-                        ent.Unmarshal(p + kRecordHeaderSize);
-                        immu_extent_mem_[ent.index] = ent;
-                        f1(ent);
+                    uint32_t crc = BigEndian::Uint32(start);
+                    uint64_t version = BigEndian::Uint64(start + 4);
+                    uint16_t len = BigEndian::Uint16(start + 12);
+                    EntryType type = static_cast<EntryType>(*(start + 14));
+                    if (crc == 0 && version == 0 && len == 0) {
+                        if (start == p) {
+                            // this sector is empty, so skip all
+                            // back sector
+                            break_loop = true;
+                        }
                         break;
                     }
-                    default:
+                    if (start + kRecordHeaderSize + len >
+                        end) {  // invalid record
+                        s.Set(EINVAL);
+                        co_return s;
+                    }
+                    if (crc32_gzip_refl(0, p + 4,
+                                        kRecordHeaderSize + len - 4) !=
+                        crc) {  // invalid record
+                        s.Set(ErrCode::ErrInvalidChecksum);
+                        co_return s;
+                    }
+                    if (version != version_) {
                         break_loop = true;
                         break;
+                    }
+
+                    switch (type) {
+                        case EntryType::Chunk: {
+                            ChunkEntry ent;
+                            ent.Unmarshal(start + kRecordHeaderSize);
+                            immu_chunk_mem_[ent.index] = ent;
+                            f2(ent);
+                            break;
+                        }
+                        case EntryType::Extent: {
+                            ExtentEntry ent;
+                            ent.Unmarshal(start + kRecordHeaderSize);
+                            immu_extent_mem_[ent.index] = ent;
+                            f1(ent);
+                            break;
+                        }
+                        default:
+                            s.Set(EINVAL);
+                            co_return s;
+                    }
                 }
-                if (break_loop) {
-                    break;
-                }
-                offset_ += sector_size;
             }
             if (break_loop) {
                 break;
             }
             offset += buf.size();
         }
+        s = co_await BackgroundFlush(version_, super_.pt[pt_n].start);
+        if (!s.OK()) {
+            co_return s;
+        }
     }
-    co_await background_sem_.wait();
-    co_await BackgroundFlush();
-    s = status_;
+    version_++;
+    offset_ = super_[index[0] + LOGA_PT].start;
+    loop_fu_ = LoopRun();
     co_return s;
 }
 
@@ -158,6 +193,8 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
     uint32_t first_index = std::numeric_limits<uint32_t>::max();
     uint32_t sector_size = super_.sector_size;
     Status<> s;
+    static size_t parallel_submit = 16;
+    seastar::semaphore sem(parallel_submit);
 
     for (auto iter : immu_chunk_mem_) {
         auto buf = seastar::temporary_buffer<char>::aligin(kMemoryAlignment,
@@ -179,16 +216,24 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
             } else {
                 uint64_t off =
                     super_.pt[CHUNK_PT].start + first_index * sector_size;
-                s = co_await dev_ptr_->Write(off, std::move(iov));
-                if (!s.OK()) {
-                    co_return s;
-                }
+                co_await sem.wait();
+                (void)dev_ptr_->Write(off, std::move(iov))
+                    .then([&sem, &s](Status<> &st) {
+                        if (!st.OK()) {
+                            s = st;
+                        }
+                        sem.signal();
+                    });
                 iov.emplace_back({buf.get(), buf.size()});
                 first_index = iter->first;
             }
             buf_vec.emplace_back(std::move(buf));
             prev_index = iter->first;
         }
+    }
+    co_await sem.wait(parallel_submit);
+    if (!s.OK()) {
+        co_return s;
     }
 
     if (!iov.empty()) {
@@ -205,6 +250,8 @@ seastar::future<Status<>> Log::SaveImmuExtents() {
     uint32_t first_index = std::numeric_limits<uint32_t>::max();
     uint32_t sector_size = super_.sector_size;
     Status<> s;
+    static size_t parallel_submit = 16;
+    seastar::semaphore sem(parallel_submit);
 
     for (auto iter : immu_extent_mem_) {
         auto buf = seastar::temporary_buffer<char>::aligin(kMemoryAlignment,
@@ -226,16 +273,25 @@ seastar::future<Status<>> Log::SaveImmuExtents() {
             } else {
                 uint64_t off =
                     super_.pt[EXTENT_PT].start + first_index * sector_size;
-                s = co_await dev_ptr_->Write(off, std::move(iov));
-                if (!s.OK()) {
-                    co_return s;
-                }
+                co_await sem.wait();
+                (void)dev_ptr_->Write(off, std::move(iov))
+                    .then([&sem, &s](Status<> &st) {
+                        if (!st.OK()) {
+                            s = st;
+                        }
+                        sem.signal();
+                    });
                 iov.emplace_back({buf.get(), buf.size()});
                 first_index = iter->first;
             }
             buf_vec.emplace_back(std::move(buf));
             prev_index = iter->first;
         }
+    }
+
+    co_await sem.wait(parallel_submit);
+    if (!s.OK()) {
+        co_return s;
     }
 
     if (!iov.empty()) {
@@ -253,19 +309,16 @@ seastar::future<Status<>> Log::BackgroundFlush(uint64_t ver,
     s = co_await SaveImmuChunks();
     if (!s.OK()) {
         status_ = s;
-        background_sem_.broken();
         co_return s;
     }
     s = co_await SaveImmuExtents();
     if (!s.OK()) {
         status_ = s;
-        background_sem_.broken();
         co_return s;
     }
 
     // change head flag
-    auto buf =
-        seastar::temporary_buffer<char>::aligin(kMemoryAlignment, sector_size);
+    auto buf = dev_ptr_->Get(kSectorSize);
     BigEndian::PutUint64(buf.get_write() + 4, ver);
     *(buf.get_write() + 12) = static_cast<char>(1);
     uint32_t crc = crc32_gzip_refl(0, buf.get() + 4, kHeaderSize - 4);
@@ -273,11 +326,9 @@ seastar::future<Status<>> Log::BackgroundFlush(uint64_t ver,
     s = co_await dev_ptr_->Write(head_offset, buf.get(), sector_size);
     if (!s.OK()) {
         status_ = s;
-        background_sem_.broken();
         co_return s;
     }
 
-    background_sem_.signal();
     co_return s;
 }
 
@@ -292,57 +343,52 @@ void Log::UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry) {
 }
 
 seastar::future<> Log::LoopRun() {
-    uint32_t sector_size = dev_ptr_->SectorSize();
-    int max_item_num = kMaxMemSize / sector_size;
+    int max_item_num = kMaxMemSize / kSectorSize;
+    std::optional<seastar::future<Status<>>> background_fu;
 
-    while (!stop_) {
+    while (!closed_) {
         std::queue<worker_item *> tmp_queue;
-        std::vector<iovec> io_vec;
-        std::vector<TmpBuffer> buffers;
-        size_t last_free_size = 0;
         uint64_t free_size = super_.pt[current_log_pt_].offset +
                              super_.pt[current_log_pt_].size - offset_;
+        TmpBuffer buffer = dev_ptr_->Get(std::min(kMaxMemSize, free_size));
+        memset(buffer.get_write(), 0, buffer.size());
+        size_t buffer_len = 0;
 
-        for (int i = 0; i < max_item_num; i++) {
+        while (buffer_len < buffer.size()) {
             if (queue_.empty()) {
                 break;
             }
-            if (offset_ == super_.pt[current_log_pt_].offset) {
+            if (offset_ == super_.pt[current_log_pt_].offset &&
+                buffer_len == 0) {
                 // add head
-                TmpBuffer head = seastar::temporary_buffer<char>::aligned(
-                    kMemoryAlignment, sector_size);
-                memset(head.get_write(), 0, sector_size);
-                LogHeaderMarshalTo(head.get_write());
-                io_vec.emplace_back({head.get(), head.size()});
-                buffers.emplace_back(std::move(head));
-                last_free_size = 0;
+                LogHeaderMarshalTo(buffer.get_write());
+                buffer_len += kSectorSize;
             }
             auto item = queue_.front();
             size_t n = item->Size() + kRecordHeaderSize;
-            if (last_free_size < n) {
-                if (buffers.size() * (sector_size + 1) > free_size) {
+            if (kSectorSize - (buffer_len & kSectorSizeMask) < n) {
+                size_t len =
+                    seastar::align_up(buffer_len, kSectorSize) + kSectorSize;
+                if (len > buffer.size()) {
                     break;
                 }
-                TmpBuffer buf = seastar::temporary_buffer<char>::aligned(
-                    kMemoryAlignment, sector_size);
-                memset(buf.get_write(), 0, sector_size);
-                io_vec.emplace_back({buf.get(), buf.size()});
-                buffers.emplace_back(std::move(buf));
-                last_free_size = sector_size;
+                // add padding
+                buffer_len += kSectorSize - (buffer_len & kSectorSizeMask);
             }
-            item->MarshalTo(buffers.back().get_write() + sector_size -
-                            last_free_size);
-            last_free_size -= n;
+            item->MarshalTo(version_, buffer.get_write() + buffer_len);
+            buffer_len += n;
             queue_.pop();
             tmp_queue.push(item);
         }
 
         Status<> s = status_;
         if (!tmp_queue.empty() && s.OK()) {
-            s = co_await dev_ptr_->Write(offset_, std::move(io_vec));
+            s = co_await dev_ptr_->Write(
+                offset_, buffer.get(),
+                seastar::align_up(buffer_len, kSectorSize));
         }
         if (s.OK()) {
-            offset_ += buffers.size() * sector_size;
+            offset_ += seastar::align_up(buffer_len, kSectorSize);
         }
         while (!tmp_queue.empty()) {
             auto tmp_item = tmp_queue.front();
@@ -350,7 +396,8 @@ seastar::future<> Log::LoopRun() {
             if (s.OK()) {
                 UpdateMem(tmp_item->entry);
             }
-            tmp_item->pr.set_value(s);
+            auto st = s;
+            tmp_item->pr.set_value(std::move(st));
         }
 
         if (s.OK() && (offset_ >= super_.pt[current_log_pt_].start +
@@ -360,24 +407,49 @@ seastar::future<> Log::LoopRun() {
             current_log_pt_ = (current_log_pt_ + 1) % 2 + LOGA_PT;
             offset_ = super_.pt[current_log_pt_].start;
             version_++;
-            try {
-                co_await background_sem_.wait();
-            } catch (...) {
-                s = status_;
-                co_return s;
+            if (background_fu) {
+                s = co_await background_fu.value();
+                background_fu.reset();
+                if (!s.OK()) {
+                    break;
+                }
+            }
+            if (closed_) {
+                status_.Set(EPIPE);
+                break;
             }
             immu_chunk_mem_ = std::move(chunk_mem_);
             immu_extent_mem_ = std::move(extent_mem_);
-            (void)BackgroundFlush(old_version, old_header_offset);
+            background_fu = BackgroundFlush(old_version, old_header_offset);
         }
-        if (queue_.empty()) {
+        if (queue_.empty() && !closed_) {
             co_await cv_.wait();
         }
     }
+
+    while (!queue_.empty()) {
+        auto item = queue_.front();
+        queue_.pop();
+        Status<> s = status_;
+        item->pr.set_value(std::move(s));
+    }
+    if (background_fu) {
+        co_await background_fu.value();
+    }
+    background_fu.reset();
     co_return;
 }
 
 seastar::future<Status<>> Log::SaveChunk(const ChunkEntry &chunk) {
+    Status<> s;
+    if (closed_ || !init_) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    if (!status_.OK()) {
+        s = status_;
+        co_return s;
+    }
     std::unique_ptr<worker_item> ptr(new worker_item);
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(chunk));
     queue_.push(*ptr);
@@ -386,11 +458,31 @@ seastar::future<Status<>> Log::SaveChunk(const ChunkEntry &chunk) {
 }
 
 seastar::future<Status<>> Log::SaveExtent(const ExtentEntry &extent) {
+    Status<> s;
+    if (closed_ || !init_) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    if (!status_.OK()) {
+        s = status_;
+        co_return s;
+    }
     std::unique_ptr<worker_item> ptr(new worker_item);
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(extent));
     queue_.push(*ptr);
     auto s = co_await ptr->pr.get_future();
     co_return s;
+}
+
+seastar::future<> Log::Close() {
+    if (!closed_) {
+        closed_ = true;
+        cv_.signal();
+        if (loop_fu_) {
+            co_await loop_fu_.value();
+        }
+    }
+    co_return;
 }
 
 }  // namespace stream

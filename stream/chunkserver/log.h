@@ -1,5 +1,10 @@
 #pragma once
 
+#include "device.h"
+#include "super_block.h"
+#include "types.h"
+#include "util/status.h"
+
 namespace snail {
 namespace stream {
 
@@ -12,6 +17,7 @@ class Log {
     DevicePtr dev_ptr_;
     const SuperBlock &super_;
 
+    bool init_ = false;
     uint64_t version_ = 0;
     int current_log_pt_ = LOGA_PT;
     uint64_t offset_;  // current offset
@@ -33,8 +39,9 @@ class Log {
 
     std::queue<worker_item *> queue_;
     seastar::condition_variable cv_;
-    seastar::semaphore background_sem_;
     Status<> status_;
+    bool closed_ = false;
+    std::optional<seastar::future<>> loop_fu_;
 
     seastar::future<> LoopRun();
 
@@ -49,7 +56,7 @@ class Log {
    public:
     explicit Log(DevicePtr dev_ptr, const SuperBlock &super_block);
 
-    seastar::future<Status<>> Recover(
+    seastar::future<Status<>> Init(
         seastar::noncopyable_function<void(const ExtentEntry &)> &&f1,
         seastar::noncopyable_function<void(const ChunkEntry &)> &&f2);
 
@@ -59,6 +66,8 @@ class Log {
 
     seastar::future<> Close();
 };
+
+using LogPtr = seastar::lw_shared_ptr<Log>;
 
 }  // namespace stream
 }  // namespace snail
