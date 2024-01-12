@@ -75,7 +75,7 @@ class Session : public seastar::enable_lw_shared_from_this<Session> {
         }
     }
 
-    void SetStatus(ErrCode code, const std::string &reason) {
+    void SetStatus(ErrCode code, const char *reason) {
         if (status_.OK()) {
             status_.Set(code, reason);
         }

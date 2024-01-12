@@ -4,18 +4,19 @@
 
 namespace snail {
 
-static std::unordered_map<ErrCode, std::string> codeMaps = {
+static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::OK, "OK"},
     {ErrCode::ErrEOF, "end of file"},
     {ErrCode::ErrExistExtent, "extent has already exist"},
+    {ErrCode::ErrNoExtent, "not found extent"},
     {ErrCode::ErrOverWrite, "write disk error"},
     {ErrCode::ErrTooShort, "data too short"},
     {ErrCode::ErrTooLarge, "data too larger"},
     {ErrCode::ErrInvalidChecksum, "invalid checksum"},
-    {ErrCode::ErrSystem, "system error"},
+    {ErrCode::ErrUnExpect, "unexpect error"},
 };
 
-std::string GetReason(ErrCode code) {
+const char* GetReason(ErrCode code) {
     if (static_cast<int>(code) < 10000 && static_cast<int>(code) != 0) {
         return std::strerror(static_cast<int>(code));
     }
@@ -26,10 +27,10 @@ std::string GetReason(ErrCode code) {
     return iter->second;
 }
 
-seastar::sstring ToJsonString(ErrCode code, const std::string& reason) {
+std::string ToJsonString(ErrCode code, const char* reason) {
     std::ostringstream oss;
     oss << "{\"code\": " << static_cast<int>(code) << ", \"message\": \""
-        << (reason == "" ? GetReason(code) : reason) << "\"}";
+        << (reason == nullptr ? GetReason(code) : reason) << "\"}";
     return oss.str();
 }
 

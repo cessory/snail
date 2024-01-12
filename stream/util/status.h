@@ -10,14 +10,15 @@ enum class ErrCode {
     //////////common error ////////
     ErrEOF = 10000,
     ErrExistExtent = 20000,
+    ErrNoExtent = 20001,
     ErrOverWrite = 20004,
     ErrTooShort = 20007,
     ErrTooLarge = 20008,
     ErrInvalidChecksum = 20010,
-    ErrSystem = 29999
+    ErrUnExpect = 29999
 };
 
-std::string GetReason(ErrCode code);
+const char* GetReason(ErrCode code);
 
 template <typename... T>
 class Status;
@@ -25,7 +26,7 @@ class Status;
 template <typename T>
 class Status<T> {
     ErrCode code_;
-    std::string reason_;
+    seastar::sstring reason_;
     T val_;
 
    public:
@@ -37,6 +38,11 @@ class Status<T> {
     }
 
     Status(ErrCode code, const std::string& reason) noexcept {
+        code_ = code;
+        reason_ = reason;
+    }
+
+    Status(ErrCode code, const char* reason) noexcept {
         code_ = code;
         reason_ = reason;
     }
@@ -78,6 +84,11 @@ class Status<T> {
         reason_ = GetReason(code_);
     }
 
+    void Set(ErrCode code, const char* reason) {
+        code_ = code;
+        reason_ = reason;
+    }
+
     void Set(ErrCode code, const std::string& reason) {
         code_ = code;
         reason_ = reason;
@@ -90,7 +101,7 @@ class Status<T> {
 
     ErrCode Code() const { return code_; }
 
-    const std::string& Reason() const { return reason_; }
+    const char* Reason() const { return reason_.c_str(); }
 
     T& Value() { return val_; }
 
@@ -100,7 +111,7 @@ class Status<T> {
 template <>
 class Status<> {
     ErrCode code_;
-    std::string reason_;
+    seastar::sstring reason_;
 
    public:
     Status() noexcept : code_(ErrCode::OK) {}
@@ -111,6 +122,11 @@ class Status<> {
     }
 
     Status(ErrCode code, const std::string& reason) noexcept {
+        code_ = code;
+        reason_ = reason;
+    }
+
+    Status(ErrCode code, const char* reason) noexcept {
         code_ = code;
         reason_ = reason;
     }
@@ -148,6 +164,11 @@ class Status<> {
         reason_ = GetReason(code_);
     }
 
+    void Set(ErrCode code, const char* reason) {
+        code_ = code;
+        reason_ = reason;
+    }
+
     void Set(ErrCode code, const std::string& reason) {
         code_ = code;
         reason_ = reason;
@@ -160,9 +181,9 @@ class Status<> {
 
     ErrCode Code() const { return code_; }
 
-    const std::string& Reason() const { return reason_; }
+    const char* Reason() const { return reason_.c_str(); }
 };
 
-seastar::sstring ToJsonString(ErrCode code, const std::string& reason = "");
+std::string ToJsonString(ErrCode code, const char* reason = nullptr);
 
 }  // namespace snail

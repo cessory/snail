@@ -174,7 +174,8 @@ seastar::future<> Session::SendLoop() {
                 auto req = write_q_[i].front();
                 write_q_[i].pop();
                 if (req->pr.has_value()) {
-                    req->pr.value().set_value(status_);
+                    Status<> s = status_;
+                    req->pr.value().set_value(std::move(s));
                 } else {
                     delete req;
                 }
@@ -223,7 +224,8 @@ seastar::future<> Session::SendLoop() {
                 auto req = sent_q.front();
                 sent_q.pop();
                 if (req->pr.has_value()) {
-                    req->pr.value().set_value(s);
+                    Status<> st = s;
+                    req->pr.value().set_value(std::move(st));
                 } else {
                     delete req;
                 }
