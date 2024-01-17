@@ -43,7 +43,7 @@ class Store {
 
     ExtentPtr GetExtent(const ExtentID& id);
 
-    seastar::future<Status<std::string>> GetLastSector(uint32_t index);
+    seastar::future<Status<std::string>> GetLastSectorData(uint32_t index);
 
    public:
     static seastar::future<DiskPtr> Load(std::string_view name);
