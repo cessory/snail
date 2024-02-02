@@ -11,68 +11,101 @@
 #include <set>
 #include <unordered_set>
 
-#include "status.h"
+#include "device.h"
+#include "log.h"
+#include "super_block.h"
+#include "types.h"
+#include "util/lru_cache.h"
+#include "util/status.h"
 
 namespace snail {
 namespace stream {
 
-enum class DevType {
-    HDD,
-    SSD,
-    NVME_KERNEL,
-    NVME_SPDK,
-    PMEM,
+class Store;
+using StorePtr = seastar::lw_shared_ptr<Store>;
+
+struct Extent : public ExtentEntry {
+    size_t len;
+    std::vector<ChunkEntry> chunks;
+    seastar::shared_mutex mu;
+    StorePtr store;
+
+    Extent();
+    ~Extent();
+    ExtentEntry GetExtentEntry();
 };
 
-class Store {
+using ExtentPtr = seastar::lw_shared_ptr<Extent>;
+class Store : public seastar::enable_lw_shared_from_this<Store> {
     DevicePtr dev_ptr_;
     SuperBlock super_block_;
     uint64_t used_ = 0;
     std::unordered_map<ExtentID, ExtentPtr> extents_;
+    std::unordered_set<ExtentID> creating_extents_;
     std::queue<uint32_t> free_extents_;
     std::queue<uint32_t> free_chunks_;
 
     LogPtr log_ptr_;
 
     // key = extent index
-    boost::compute::detail::lru_cache<uint32_t, std::string> last_sector_cache_;
-
-    seastar::future<bool> Recover();
+    LRUCache<uint32_t, std::string> last_sector_cache_;
 
     seastar::future<Status<>> AllocChunk(ExtentPtr extent_ptr);
 
-    ExtentPtr GetExtent(const ExtentID& id);
+    Status<> HandleFirst(ChunkEntry& chunk, int io_n, char* b, size_t len,
+                         std::vector<TmpBuffer>& tmp_buf_vec,
+                         std::vector<iovec>& tmp_io_vec, uint64_t& offset,
+                         std::string& last_sector_data);
 
-    seastar::future<Status<std::string>> GetLastSectorData(uint32_t index);
+    Status<> HandleIO(ChunkEntry& chunk, int io_n, char* b, size_t len,
+                      std::vector<TmpBuffer>& tmp_buf_vec,
+                      std::vector<iovec>& tmp_io_vec,
+                      std::string& last_sector_data, int i);
+
+    seastar::future<Status<std::string>> GetLastSectorData(ExtentPtr ptr);
+
+    friend struct Extent;
 
    public:
-    static seastar::future<DiskPtr> Load(std::string_view name);
+    static seastar::future<StorePtr> Load(std::string_view name,
+                                          DevType dev_type,
+                                          size_t cache_cap = 1024);
 
     static seastar::future<bool> Format(std::string_view name,
                                         uint32_t cluster_id, DevType dev_type,
-                                        uint32_t dev_id, uint64_t capacity = 0);
-    Store() = default;
+                                        uint32_t dev_id,
+                                        uint64_t log_cap = 64 << 20,
+                                        uint64_t capacity = 0);
+
+    Store(size_t cache_capacity = 1024) : last_sector_cache_(cache_capacity) {}
+
+    ~Store() {}
 
     uint32_t DeviceId() const;
 
-    uint32_t SectorSize() const;
-
     seastar::future<Status<>> CreateExtent(ExtentID id);
 
-    seastar::future<Status<>> Write(ExtentID id, uint64_t offset, const char* b,
-                                    size_t len);
+    // 同时写入多个block
+    // 中间的block必须是全部填满block大小
+    seastar::future<Status<>> WriteBlocks(ExtentPtr extent_ptr, uint64_t offset,
+                                          std::vector<iovec> iov);
 
-    seastar::future<Status<>> Write(ExtentID id, uint64_t offset,
-                                    std::vector<iovec> iov);
+    // 读取一个block的数据
+    // off - 必须block对齐(32k -4)
+    // 返回一个block的实际数据, 包含crc
+    seastar::future<Status<seastar::temporary_buffer<char>>> ReadBlock(
+        ExtentPtr extent_ptr, uint64_t off);
 
-    seastar::future<Status<size_t>> Read(ExtentID id, uint64_t pos,
-                                         char* buffer, size_t len);
+    // 读取多个block的数据
+    // off - 必须block对齐(32k -4)
+    // n   - block的个数
+    // 返回多个block的实际数据, 包含crc, 最后一个block可能不足32k-4
+    seastar::future<Status<std::vector<seastar::temporary_buffer<char>>>>
+    ReadBlocks(ExtentPtr extent_ptr, uint64_t off, uint32_t n);
 
-    seastar::future<Status<seastar::temporary_buffer<char>>> Read(ExtentID id,
-                                                                  uint64_t pos,
-                                                                  size_t len);
+    seastar::future<Status<>> RemoveExtent(ExtentID id);
 
-    seastar::future<Status<void>> RemoveExtent(ExtentID id);
+    ExtentPtr GetExtent(const ExtentID& id);
 
     uint64_t Capacity() const;
 
@@ -80,8 +113,6 @@ class Store {
 
     seastar::future<> Close();
 };
-
-using StorePtr = seastar::lw_shared_ptr<Store>;
 
 }  // namespace stream
 }  // namespace snail

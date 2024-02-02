@@ -1,11 +1,22 @@
 #pragma once
+#include <sys/uio.h>
+
+#include <seastar/core/future.hh>
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/temporary_buffer.hh>
+#include <string_view>
+#include <vector>
+
+#include "util/status.h"
 
 namespace snail {
 namespace stream {
 
 class Device {
    public:
-    virtual size_t Capacity() = 0;
+    virtual const std::string& Name() const = 0;
+
+    virtual size_t Capacity() const = 0;
 
     virtual seastar::temporary_buffer<char> Get(size_t n) = 0;
 

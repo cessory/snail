@@ -1,5 +1,12 @@
 #pragma once
 
+#include <map>
+#include <optional>
+#include <queue>
+#include <seastar/core/condition-variable.hh>
+#include <seastar/core/future.hh>
+#include <variant>
+
 #include "device.h"
 #include "super_block.h"
 #include "types.h"
@@ -8,14 +15,9 @@
 namespace snail {
 namespace stream {
 
-enum EntryType {
-    Extent = 0,
-    Chunk = 1,
-};
-
 class Log {
     DevicePtr dev_ptr_;
-    const SuperBlock &super_;
+    SuperBlock super_;
 
     bool init_ = false;
     uint64_t version_ = 0;
@@ -51,14 +53,14 @@ class Log {
     seastar::future<Status<>> BackgroundFlush(uint64_t ver,
                                               uint64_t header_offset);
 
-    void UpdateMem(worker_item *item);
+    void UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry);
 
    public:
     explicit Log(DevicePtr dev_ptr, const SuperBlock &super_block);
 
     seastar::future<Status<>> Init(
-        seastar::noncopyable_function<void(const ExtentEntry &)> &&f1,
-        seastar::noncopyable_function<void(const ChunkEntry &)> &&f2);
+        seastar::noncopyable_function<Status<>(const ExtentEntry &)> &&f1,
+        seastar::noncopyable_function<Status<>(const ChunkEntry &)> &&f2);
 
     seastar::future<Status<>> SaveChunk(const ChunkEntry &chunk);
 

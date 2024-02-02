@@ -5,10 +5,9 @@
 #include <seastar/http/httpd.hh>
 #include <seastar/http/routes.hh>
 
-#include "http_service.h"
-#include "lease_mgr.h"
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/spdlog.h"
+#include "store.h"
 
 namespace bpo = boost::program_options;
 
@@ -46,7 +45,6 @@ int main(int argc, char** argv) {
     boost::program_options::options_description desc;
     desc.add_options()("help,h", "show help message");
     desc.add_options()("format", bpo::value<std::string>(), "format disk");
-    desc.add_options()("http_port", bpo::value<uint16_t>(), "HTTP Server port");
     desc.add_options()("disk", bpo::value<std::string>(), "disk path");
     desc.add_options()("logfile", bpo::value<std::string>(), "log file");
     desc.add_options()("loglevel", bpo::value<std::string>(), "log level");
@@ -89,8 +87,8 @@ int main(int argc, char** argv) {
                 stop_signal signal;
                 if (vm.count("format")) {
                     std::string path = vm["format"].as<std::string>();
-                    auto ok = snail::stream::Disk::Format(
-                                  path, 1, snail::stream::DiskType::HDD, 1)
+                    auto ok = snail::stream::Store::Format(
+                                  path, 1, snail::stream::DevType::HDD, 1)
                                   .get();
                     if (!ok) {
                         SPDLOG_ERROR("format {} error", path);
@@ -105,59 +103,6 @@ int main(int argc, char** argv) {
                     return;
                 }
                 std::string disk_path = vm["disk"].as<std::string>();
-
-                snail::stream::DiskPtr disk_ptr;
-                try {
-                    disk_ptr = snail::stream::Disk::Load(disk_path).get();
-                } catch (std::exception& e) {
-                    SPDLOG_ERROR("load disk error: {}", e.what());
-                    return;
-                }
-                snail::stream::LeaseMgrPtr lease_mgr_ptr =
-                    seastar::make_lw_shared<snail::stream::LeaseMgr>();
-
-                if (!vm.count("http_port")) {
-                    SPDLOG_ERROR("not found http port");
-                    return;
-                }
-                uint16_t http_port = vm["http_port"].as<uint16_t>();
-                auto server = new seastar::httpd::http_server_control();
-                server->start().get();
-                server
-                    ->set_routes(
-                        [disk_ptr, lease_mgr_ptr](seastar::httpd::routes& r) {
-                            r.put(seastar::httpd::PUT, "/chunk",
-                                  new snail::stream::HttpWriteHandler(
-                                      disk_ptr, lease_mgr_ptr));
-                        })
-                    .get();
-                server
-                    ->set_routes([disk_ptr](seastar::httpd::routes& r) {
-                        r.put(seastar::httpd::GET, "/chunk",
-                              new snail::stream::HttpReadHandler(disk_ptr));
-                    })
-                    .get();
-                server
-                    ->set_routes(
-                        [disk_ptr, lease_mgr_ptr](seastar::httpd::routes& r) {
-                            r.put(seastar::httpd::POST, "/chunk",
-                                  new snail::stream::HttpWriteHandler(
-                                      disk_ptr, lease_mgr_ptr));
-                        })
-                    .get();
-                server
-                    ->set_routes(
-                        [disk_ptr, lease_mgr_ptr](seastar::httpd::routes& r) {
-                            r.put(seastar::httpd::DELETE, "/chunk",
-                                  new snail::stream::HttpWriteHandler(
-                                      disk_ptr, lease_mgr_ptr));
-                        })
-                    .get();
-                server->listen(http_port).get();
-                SPDLOG_INFO("Seastar HTTP server listening on port {} ...",
-                            http_port);
-                seastar::engine().at_exit([server] { return server->stop(); });
-                signal.wait().get();
                 return;
             });
         });

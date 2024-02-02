@@ -11,6 +11,7 @@ enum class ErrCode {
     ErrEOF = 10000,
     ErrExistExtent = 20000,
     ErrNoExtent = 20001,
+    ErrExtentIsWriting = 20002,
     ErrOverWrite = 20004,
     ErrTooShort = 20007,
     ErrTooLarge = 20008,
@@ -106,6 +107,13 @@ class Status<T> {
     T& Value() { return val_; }
 
     void SetValue(T val) { val_ = std::move(val); }
+
+    std::string String() const {
+        std::ostringstream oss;
+        oss << "{\"code\": " << static_cast<int>(code_) << ", \"message\": \""
+            << (reason_.empty() ? GetReason(code_) : reason_) << "\"}";
+        return oss.str();
+    }
 };
 
 template <>
@@ -182,8 +190,13 @@ class Status<> {
     ErrCode Code() const { return code_; }
 
     const char* Reason() const { return reason_.c_str(); }
-};
 
-std::string ToJsonString(ErrCode code, const char* reason = nullptr);
+    std::string String() const {
+        std::ostringstream oss;
+        oss << "{\"code\": " << static_cast<int>(code_) << ", \"message\": \""
+            << (reason_.empty() ? GetReason(code_) : reason_) << "\"}";
+        return oss.str();
+    }
+};
 
 }  // namespace snail

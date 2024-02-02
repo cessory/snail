@@ -1,4 +1,7 @@
 #pragma once
+#include <array>
+
+#include "types.h"
 
 namespace snail {
 namespace stream {
@@ -17,20 +20,41 @@ struct Partition {
     uint64_t size = 0;
 };
 
+constexpr uint32_t kSuperBlockSize = 108;
+
 struct SuperBlock {
     uint32_t magic = 0;
     uint32_t version = 0;
     uint32_t cluster_id = 0;
     DevType dev_type = DevType::HDD;
     uint32_t dev_id = 0;
-    uint32_t sector_size = 512;
     uint64_t capacity = 0;
-    Partition pt[MAX_PT];  // extent meta pt[0] chunk meta pt[1]
-                           // log pt[2] pt[3] data pt[4]
+    std::array<Partition, MAX_PT> pt;  // extent meta pt[0] chunk meta pt[1]
+                                       // log pt[2] pt[3] data pt[4]
 
+    SuperBlock() = default;
+    SuperBlock(const SuperBlock &x) {
+        magic = x.magic;
+        version = x.version;
+        cluster_id = x.cluster_id;
+        dev_type = x.dev_type;
+        capacity = x.capacity;
+        pt = x.pt;
+    }
+
+    SuperBlock &operator=(const SuperBlock &x) {
+        if (this != &x) {
+            magic = x.magic;
+            version = x.version;
+            cluster_id = x.cluster_id;
+            dev_type = x.dev_type;
+            capacity = x.capacity;
+            pt = x.pt;
+        }
+        return *this;
+    }
     void MarshalTo(char *b);
-
-    void Unmarshal(const char *b, size_t len);
+    void Unmarshal(const char *b);
 
     inline uint64_t ExtentMetaOffset() const { return pt[EXTENT_PT].start; }
     inline uint64_t ExtentMetaSize() const { return pt[EXTENT_PT].size; }

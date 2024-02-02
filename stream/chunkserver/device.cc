@@ -1,31 +1,53 @@
 #include "device.h"
 
+#include <seastar/core/coroutine.hh>
+#include <seastar/core/file.hh>
+#include <seastar/core/seastar.hh>
+#include <seastar/core/when_all.hh>
+
+#include "spdlog/spdlog.h"
+#include "types.h"
+
 namespace snail {
 namespace stream {
 
 class KernelDevice : public Device {
     std::string name_;
     seastar::file fp_;
+    size_t capacity_;
 
    public:
+    KernelDevice() {}
+
+    virtual ~KernelDevice() {}
+
     static seastar::future<DevicePtr> Open(const std::string_view name) {
         seastar::shared_ptr<KernelDevice> ptr =
             seastar::make_shared<KernelDevice>();
         try {
             ptr->fp_ =
                 co_await seastar::open_file_dma(name, seastar::open_flags::rw);
+            ptr->capacity_ = co_await ptr->fp_.size();
         } catch (std::exception& e) {
-            SPDLOG_ERROR("load disk {} error: {}", name, e.what());
-            co_await ptr->fp_.close();
+            SPDLOG_ERROR("open disk {} error: {}", name, e.what());
+            if (ptr->fp_) {
+                co_await ptr->fp_.close();
+            }
             co_return seastar::coroutine::return_exception(std::move(e));
         }
         ptr->name_ = name;
-        SPDLOG_INFO("load disk {} success", name);
         co_return dynamic_pointer_cast<Device, KernelDevice>(ptr);
     }
 
-    seastar::temporary_buffer<char> Get(size_t n) {
-        return seastar::temporary_buffer<char>::aligned(kMemoryAlignment, n);
+    const std::string& Name() const override { return name_; }
+
+    size_t Capacity() const override { return capacity_; }
+
+    seastar::temporary_buffer<char> Get(size_t n) override {
+        size_t len = std::max(n, kMemoryAlignment);
+        auto buf =
+            seastar::temporary_buffer<char>::aligned(kMemoryAlignment, len);
+        return std::move(buf.share(0, n));
     }
 
     seastar::future<Status<>> Write(uint64_t pos, const char* b,
@@ -47,14 +69,23 @@ class KernelDevice : public Device {
     seastar::future<Status<>> Write(uint64_t pos,
                                     std::vector<iovec> iov) override {
         Status<> s;
-        size_t expect = 0;
-        for (int i = 0; i < iov.size(); i++) {
-            expect += iov[i].iov_len;
-        }
+        std::vector<seastar::future<size_t>> fu_vec;
         try {
-            auto n = co_await fp_.dma_write(pos, std::move(iov));
-            if (n != expect) {
-                s.Set(ErrCode::ErrUnExpect, "return unexpect bytes");
+            int n = iov.size();
+            for (int i = 0; i < n; i++) {
+                auto fu = fp_.dma_write(
+                    pos, reinterpret_cast<const char*>(iov[i].iov_base),
+                    iov[i].iov_len);
+                pos += iov[i].iov_len;
+                fu_vec.emplace_back(std::move(fu));
+            }
+            auto res = co_await seastar::when_all_succeed(fu_vec.begin(),
+                                                          fu_vec.end());
+            for (int i = 0; i < n; i++) {
+                if (res[i] != iov[i].iov_len) {
+                    s.Set(ErrCode::ErrUnExpect, "return unexpect bytes");
+                    break;
+                }
             }
         } catch (std::system_error& e) {
             s.Set(e.code().value());
@@ -64,8 +95,8 @@ class KernelDevice : public Device {
         co_return s;
     }
 
-    seastar::future<std::pair<int, size_t>> Read(uint64_t pos, char* b,
-                                                 size_t len) override {
+    seastar::future<Status<size_t>> Read(uint64_t pos, char* b,
+                                         size_t len) override {
         Status<size_t> s;
         s.SetValue(0);
         try {
@@ -79,8 +110,8 @@ class KernelDevice : public Device {
         co_return s;
     }
 
-    seastar::future<std::pair<int, size_t>> Read(
-        uint64_t pos, std::vector<iovec> iov) override {
+    seastar::future<Status<size_t>> Read(uint64_t pos,
+                                         std::vector<iovec> iov) override {
         Status<size_t> s;
         try {
             size_t n = co_await fp_.dma_read(pos, iov);
@@ -323,6 +354,20 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
 };
 
 #endif
+
+seastar::future<DevicePtr> OpenKernelDevice(const std::string_view name) {
+    DevicePtr ptr;
+    try {
+        ptr = co_await KernelDevice::Open(name);
+    } catch (...) {
+        co_return nullptr;
+    }
+    co_return ptr;
+}
+
+seastar::future<DevicePtr> OpenSpdkDevice(const std::string_view name) {
+    co_return nullptr;
+}
 
 }  // namespace stream
 }  // namespace snail

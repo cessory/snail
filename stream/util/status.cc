@@ -9,6 +9,7 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::ErrEOF, "end of file"},
     {ErrCode::ErrExistExtent, "extent has already exist"},
     {ErrCode::ErrNoExtent, "not found extent"},
+    {ErrCode::ErrExtentIsWriting, "extent is writing"},
     {ErrCode::ErrOverWrite, "write disk error"},
     {ErrCode::ErrTooShort, "data too short"},
     {ErrCode::ErrTooLarge, "data too larger"},
@@ -25,13 +26,6 @@ const char* GetReason(ErrCode code) {
         return "unknown error";
     }
     return iter->second;
-}
-
-std::string ToJsonString(ErrCode code, const char* reason) {
-    std::ostringstream oss;
-    oss << "{\"code\": " << static_cast<int>(code) << ", \"message\": \""
-        << (reason == nullptr ? GetReason(code) : reason) << "\"}";
-    return oss.str();
 }
 
 }  // namespace snail
