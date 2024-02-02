@@ -1,79 +1,76 @@
 #include "tcp_connection.h"
 
+#include <netinet/tcp.h>
+
 #include <seastar/core/coroutine.hh>
 namespace snail {
 namespace net {
 
-TcpConnection::TcpConnection(seastar::connected_socket socket,
+TcpConnection::TcpConnection(seastar::pollable_fd fd,
                              seastar::socket_address remote)
-    : socket_(std::move(socket)), remote_address_(remote) {
-    socket_.set_nodelay(true);
-    out_ = socket_.output(65536);
-    in_ = socket_.input();
-    closed_ = false;
+    : fd_(std::move(fd)), remote_address_(remote), closed_(false) {
+    int val = 1;
+    fd_.get_file_desc().setsockopt(IPPROTO_TCP, TCP_NODELAY & val, sizeof(val));
 }
 
 seastar::future<Status<>> TcpConnection::Write(seastar::net::packet&& p) {
-    Status<> s(ErrCode::OK);
-    try {
-        co_await out_.write(std::move(p));
-    } catch (std::exception& e) {
-        s.Set(ErrCode::ErrSystem, e.what());
-    }
-    co_return s;
-}
-
-seastar::future<Status<>> TcpConnection::Flush() {
-    Status<> s(ErrCode::OK);
-    try {
-        co_await out_.flush();
-    } catch (std::exception& e) {
-        s.Set(ErrCode::ErrSystem, e.what());
-    }
-    co_return s;
-}
-
-seastar::future<Status<seastar::temporary_buffer<char>>> TcpConnection::Read() {
-    Status<seastar::temporary_buffer<char>> s(ErrCode::OK);
-    try {
-        auto b = co_await in_.read();
-        s.SetValue(std::move(b));
-    } catch (std::exception& e) {
-        s.Set(ErrCode::ErrSystem, e.what());
-    }
-    co_return s;
-}
-
-seastar::future<Status<seastar::temporary_buffer<char>>>
-TcpConnection::ReadExactly(size_t n) {
-    Status<seastar::temporary_buffer<char>> s(ErrCode::OK);
-    try {
-        auto b = co_await in_.read_exactly(n);
-        s.SetValue(std::move(b));
-    } catch (std::exception& e) {
-        s.Set(ErrCode::ErrSystem, e.what());
-    }
-    co_return s;
-}
-
-seastar::future<Status<>> TcpConnection::Close() {
     Status<> s;
-    if (!closed_) {
-        closed_ = true;
+    try {
+        co_await fd_.write_all(p);
+    } catch (std::system_error& e) {
+        s.Set(e.code().value());
+    } catch (std::exception& e) {
+        s.Set(ErrCode::ErrUnExpect, e.what());
+    }
+    co_return s;
+}
+
+seastar::future<Status<size_t>> TcpConnection::Read(char* buffer, size_t len) {
+    Status<size_t> s;
+    try {
+        auto n = co_await fd_.read_some(buffer, len);
+        s.SetValue(n);
+    } catch (std::system_error& e) {
+        s.Set(e.code().value());
+    } catch (std::exception& e) {
+        s.Set(ErrCode::ErrUnExpect, e.what());
+    }
+    co_return s;
+}
+
+seastar::future<Status<size_t>> TcpConnection::ReadExactly(char* buffer,
+                                                           size_t len) {
+    Status<size_t> s;
+    size_t n = 0;
+    while (n < len) {
         try {
-            co_await out_.close();
-            co_await in_.close();
-            socket_.shutdown_output();
-            socket_.shutdown_input();
+            auto bytes = co_await fd_.read_some(buffer + n, len - n);
+            n += bytes;
+            if (bytes == 0) {  // the conn has been closed
+                s.SetValue(0);
+                break;
+            }
+        } catch (std::system_error& e) {
+            s.Set(e.code().value());
+            co_return s;
         } catch (std::exception& e) {
-            s.Set(ErrCode::ErrSystem, e.what());
+            s.Set(ErrCode::ErrUnExpect, e.what());
+            co_return s;
         }
     }
+    s.SetValue(n);
     co_return s;
+}
+
+void TcpConnection::Close() {
+    if (!closed_) {
+        closed_ = true;
+        fd_.shutdown(SHUT_RDWR);
+    }
 }
 
 std::string TcpConnection::LocalAddress() {
-    seastar::socket_address sa = socket_.local_address();
+    seastar::socket_address sa = fd_.get_file_desc().get_address();
     std::ostringstream ss;
     ss << sa;
     return ss.str();
@@ -85,11 +82,9 @@ std::string TcpConnection::RemoteAddress() {
     return ss.str();
 }
 
-seastar::shared_ptr<Connection> TcpConnection::make_connection(
-    seastar::connected_socket socket, seastar::socket_address remote) {
-    TcpConnectionPtr ptr =
-        seastar::make_shared<TcpConnection>(std::move(socket), remote);
-    return seastar::dynamic_pointer_cast<Connection, TcpConnection>(ptr);
+seastar::shared_ptr<TcpConnection> TcpConnection::make_connection(
+    seastar::pollable_fd fd, seastar::socket_address remote) {
+    return seastar::make_shared<TcpConnection>(std::move(fd), remote);
 }
 
 }  // namespace net

@@ -5,8 +5,8 @@
 #include <seastar/core/thread.hh>
 #include <seastar/core/when_all.hh>
 
-#include "session.h"
 #include "tcp_connection.h"
+#include "tcp_session.h"
 
 namespace bpo = boost::program_options;
 
@@ -40,16 +40,22 @@ seastar::future<> test_stream(snail::net::StreamPtr stream) {
 seastar::future<> test_client(uint16_t port) {
     seastar::socket_address sa(seastar::ipv4_addr("127.0.0.1", port));
 
-    auto socket = co_await seastar::connect(sa);
-    auto conn =
-        snail::net::TcpConnection::make_connection(std::move(socket), sa);
+    auto fd = seastar::engine().make_pollable_fd(sa, 0);
+    try {
+        co_await seastar::engine().posix_connect(fd, sa,
+                                                 seastar::socket_address());
+    } catch (std::exception& e) {
+        std::cout << "connect server error: " << e.what() << std::endl;
+        co_return;
+    }
+    auto conn = snail::net::TcpConnection::make_connection(std::move(fd), sa);
 
     snail::net::Option opt;
     opt.version = 2;
     auto sess = snail::net::Session::make_session(opt, conn, true);
 
     std::vector<seastar::future<>> fu_vec;
-    for (int i = 0; i < 1; i++) {
+    for (int i = 0; i < 10; i++) {
         auto s = co_await sess->OpenStream();
         if (!s.OK()) {
             std::cout << "open stream error: " << s.Reason() << std::endl;

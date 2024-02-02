@@ -5,8 +5,8 @@
 #include <seastar/core/thread.hh>
 #include <seastar/core/when_all.hh>
 
-#include "session.h"
 #include "tcp_connection.h"
+#include "tcp_session.h"
 #include "util/status.h"
 
 namespace bpo = boost::program_options;
@@ -50,11 +50,11 @@ seastar::future<> handle_sess(snail::net::SessionPtr sess) {
 seastar::future<> test_server(uint16_t port) {
     seastar::socket_address sa(seastar::ipv4_addr("127.0.0.1", port));
 
-    auto socket = seastar::listen(sa);
+    auto fd = seastar::engine().posix_listen(sa);
     for (;;) {
-        auto ar = co_await socket.accept();
+        auto ar = co_await fd.accept();
         auto conn = snail::net::TcpConnection::make_connection(
-            std::move(ar.connection), ar.remote_address);
+            std::move(std::get<0>(ar)), std::get<1>(ar));
         snail::net::Option opt;
         opt.version = 2;
         opt.max_receive_buffer = 128 << 20;

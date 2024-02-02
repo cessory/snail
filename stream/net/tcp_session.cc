@@ -1,4 +1,4 @@
-#include "session.h"
+#include "tcp_session.h"
 
 #include <limits.h>
 
@@ -12,17 +12,35 @@ namespace net {
 
 static const size_t default_accept_backlog = 1024;
 
-Session::Session(const Option &opt, ConnectionPtr conn, bool client)
+class DefaultBufferAllocator : public BufferAllocator {
+   public:
+    virtual ~DefaultBufferAllocator() {}
+    seastar::temporary_buffer<char> Allocate(size_t len) override {
+        size_t origin_len = len;
+        len = std::max(len, static_cast<size_t>(4096));
+        auto buf = seastar::temporary_buffer<char>::aligned(4096, len);
+        buf.trim(origin_len);
+        return buf;
+    }
+};
+
+Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
+                 std::unique_ptr<BufferAllocator> allocator)
     : opt_(opt),
       conn_(std::move(conn)),
+      allocator_(allocator ? allocator.release()
+                           : dynamic_cast<BufferAllocator *>(
+                                 new DefaultBufferAllocator())),
       next_id_((client ? 1 : 0)),
       die_(false),
       accept_sem_(default_accept_backlog),
       tokens_(opt.max_receive_buffer) {}
 
-SessionPtr Session::make_session(const Option &opt, ConnectionPtr conn,
-                                 bool client) {
-    SessionPtr sess_ptr = seastar::make_lw_shared<Session>(opt, conn, client);
+SessionPtr Session::make_session(const Option &opt, TcpConnectionPtr conn,
+                                 bool client,
+                                 std::unique_ptr<BufferAllocator> allocator) {
+    SessionPtr sess_ptr = seastar::make_lw_shared<Session>(
+        opt, conn, client, std::move(allocator));
     sess_ptr->recv_fu_ = sess_ptr->RecvLoop();
     sess_ptr->send_fu_ = sess_ptr->SendLoop();
     sess_ptr->StartKeepalive();
@@ -32,9 +50,13 @@ SessionPtr Session::make_session(const Option &opt, ConnectionPtr conn,
 seastar::future<> Session::RecvLoop() {
     auto ptr = shared_from_this();
     auto defer = seastar::defer([this] {
+        conn_->Close();
+        CloseAllStreams();
         accept_cv_.signal();
         w_cv_.signal();
     });
+
+    char hdr[STREAM_HEADER_SIZE];
     while (!die_) {
         if (tokens_ < 0) {
             co_await token_cv_.wait();
@@ -42,29 +64,22 @@ seastar::future<> Session::RecvLoop() {
                 break;
             }
         }
-        auto s = co_await conn_->ReadExactly(
-            static_cast<size_t>(STREAM_HEADER_SIZE));
+        auto s = co_await conn_->ReadExactly(hdr, STREAM_HEADER_SIZE);
         if (!s.OK()) {
             SetStatus(s.Code(), s.Reason());
-            co_await conn_->Close();
-            CloseAllStreams();
             break;
         }
-        auto hdr = std::move(s.Value());
-        if (hdr.empty()) {
+
+        if (s.Value() == 0) {
             SetStatus(static_cast<ErrCode>(ECONNABORTED));
-            co_await conn_->Close();
-            CloseAllStreams();
             break;
         }
         uint8_t ver = hdr[0];
         CmdType cmd = static_cast<CmdType>(hdr[1]);
-        uint16_t len = LittleEndian::Uint16(hdr.get() + 2);
-        uint32_t sid = LittleEndian::Uint32(hdr.get() + 4);
+        uint16_t len = LittleEndian::Uint16(&hdr[2]);
+        uint32_t sid = LittleEndian::Uint32(&hdr[4]);
         if (ver != 1 && ver != 2) {
             SetStatus(static_cast<ErrCode>(ECONNABORTED));
-            co_await conn_->Close();
-            CloseAllStreams();
             break;
         }
         switch (cmd) {
@@ -97,24 +112,21 @@ seastar::future<> Session::RecvLoop() {
             }
             case CmdType::PSH:
                 if (len > 0) {
-                    auto s =
-                        co_await conn_->ReadExactly(static_cast<size_t>(len));
+                    auto buf = allocator_->Allocate(static_cast<size_t>(len));
+                    auto s = co_await conn_->ReadExactly(buf.get_write(),
+                                                         buf.size());
                     if (!s.OK()) {
                         SetStatus(s.Code(), s.Reason());
-                        co_await conn_->Close();
-                        CloseAllStreams();
                         co_return;
                     }
-                    if (s.Value().empty()) {
+                    if (s.Value() == 0) {
                         SetStatus(static_cast<ErrCode>(ECONNABORTED));
-                        co_await conn_->Close();
-                        CloseAllStreams();
                         co_return;
                     }
                     auto it = streams_.find(sid);
                     if (it != streams_.end()) {
                         auto stream = it->second;
-                        stream->PushData(std::move(s.Value()));
+                        stream->PushData(std::move(buf));
                         tokens_ -= len;
                     }
                 }
@@ -122,39 +134,29 @@ seastar::future<> Session::RecvLoop() {
             case CmdType::UPD:
                 if (len != 8) {
                     SetStatus(static_cast<ErrCode>(EINVAL));
-                    co_await conn_->Close();
-                    CloseAllStreams();
                     co_return;
                 } else {
-                    auto s =
-                        co_await conn_->ReadExactly(static_cast<size_t>(len));
+                    char buf[8];
+                    auto s = co_await conn_->ReadExactly(buf, 8);
                     if (!s.OK()) {
                         SetStatus(s.Code(), s.Reason());
-                        co_await conn_->Close();
-                        CloseAllStreams();
                         co_return;
                     }
-                    if (s.Value().empty()) {
+                    if (s.Value() == 0) {
                         SetStatus(static_cast<ErrCode>(ECONNABORTED));
-                        co_await conn_->Close();
-                        CloseAllStreams();
                         co_return;
                     }
                     auto it = streams_.find(sid);
                     if (it != streams_.end()) {
                         auto stream = it->second;
-                        uint32_t consumed =
-                            LittleEndian::Uint32(s.Value().get());
-                        uint32_t window =
-                            LittleEndian::Uint32(s.Value().get() + 4);
+                        uint32_t consumed = LittleEndian::Uint32(buf);
+                        uint32_t window = LittleEndian::Uint32(&buf[4]);
                         stream->Update(consumed, window);
                     }
                 }
                 break;
             default:
                 SetStatus(static_cast<ErrCode>(EINVAL));
-                co_await conn_->Close();
-                CloseAllStreams();
                 co_return;
         }
     }
@@ -165,6 +167,8 @@ seastar::future<> Session::SendLoop() {
     static uint32_t max_packet_num = IOV_MAX;
     auto ptr = shared_from_this();
     auto defer = seastar::defer([this] {
+        conn_->Close();
+        CloseAllStreams();
         accept_cv_.signal();
         accept_sem_.broken();
         token_cv_.signal();
@@ -216,10 +220,6 @@ seastar::future<> Session::SendLoop() {
         }
         if (packet.len() > 0) {
             s = co_await conn_->Write(std::move(packet));
-            if (s.OK()) {
-                s = co_await conn_->Flush();
-            }
-
             while (!sent_q.empty()) {
                 auto req = sent_q.front();
                 sent_q.pop();
@@ -233,8 +233,6 @@ seastar::future<> Session::SendLoop() {
 
             if (!s.OK()) {
                 SetStatus(s);
-                co_await conn_->Close();
-                CloseAllStreams();
                 break;
             }
         }
@@ -386,7 +384,7 @@ seastar::future<> Session::Close() {
         token_cv_.signal();
         accept_cv_.signal();
         keepalive_timer_.cancel();
-        co_await conn_->Close();
+        conn_->Close();
         co_await send_fu_.value().then([] {});
         co_await recv_fu_.value().then([] {});
         CloseAllStreams();

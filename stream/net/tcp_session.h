@@ -9,16 +9,16 @@
 #include <seastar/core/timer.hh>
 #include <unordered_map>
 
-#include "connection.h"
 #include "frame.h"
-#include "stream.h"
+#include "tcp_connection.h"
+#include "tcp_stream.h"
 #include "util/status.h"
 
 namespace snail {
 namespace net {
 
 struct Option {
-    uint8_t version = 1;
+    uint8_t version = 2;
     bool keep_alive_enable = false;
     int keep_alive_interval = 10;  // unit: s
     uint16_t max_frame_size = 65535;
@@ -26,9 +26,16 @@ struct Option {
     uint32_t max_stream_buffer = 262144;     // 256 K
 };
 
+class BufferAllocator {
+   public:
+    virtual ~BufferAllocator() = default;
+    virtual seastar::temporary_buffer<char> Allocate(size_t len) = 0;
+};
+
 class Session : public seastar::enable_lw_shared_from_this<Session> {
     Option opt_;
-    ConnectionPtr conn_;
+    TcpConnectionPtr conn_;
+    std::unique_ptr<BufferAllocator> allocator_;
     uint32_t next_id_;
 
     std::unordered_map<uint32_t, StreamPtr> streams_;
@@ -93,10 +100,12 @@ class Session : public seastar::enable_lw_shared_from_this<Session> {
     friend class Stream;
 
    public:
-    explicit Session(const Option &opt, ConnectionPtr conn, bool client);
+    explicit Session(const Option &opt, TcpConnectionPtr conn, bool client,
+                     std::unique_ptr<BufferAllocator> allocator = nullptr);
 
-    static SessionPtr make_session(const Option &opt, ConnectionPtr conn,
-                                   bool client);
+    static SessionPtr make_session(
+        const Option &opt, TcpConnectionPtr conn, bool client,
+        std::unique_ptr<BufferAllocator> allocator = nullptr);
 
     ~Session() { std::cout << "session deconstructer" << std::endl; }
 
