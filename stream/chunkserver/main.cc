@@ -5,9 +5,8 @@
 #include <seastar/http/httpd.hh>
 #include <seastar/http/routes.hh>
 
-#include "spdlog/sinks/rotating_file_sink.h"
-#include "spdlog/spdlog.h"
 #include "store.h"
+#include "util/logger.h"
 
 namespace bpo = boost::program_options;
 
@@ -46,6 +45,8 @@ int main(int argc, char** argv) {
     desc.add_options()("help,h", "show help message");
     desc.add_options()("format", bpo::value<std::string>(), "format disk");
     desc.add_options()("disk", bpo::value<std::string>(), "disk path");
+    desc.add_options()("cpu", bpo::value<unsigned>(), "bind cpu id");
+    desc.add_options()("port", bpo::value<uint16_t>(), "listen port");
     desc.add_options()("logfile", bpo::value<std::string>(), "log file");
     desc.add_options()("loglevel", bpo::value<std::string>(), "log level");
 
@@ -66,19 +67,19 @@ int main(int argc, char** argv) {
 
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%f][%l][%s:%#] %v");
     if (vm.count("logfile")) {
-        auto logger = spdlog::rotating_logger_mt(
-            "chunkserver", vm["logfile"].as<std::string>(), 1073741824, 10);
-        spdlog::set_default_logger(logger);
+        LOG_INIT(vm["logfile"].as<std::string>(), 1073741824, 10);
     }
 
     if (vm.count("loglevel")) {
-        spdlog::set_level(
-            spdlog::level::from_str(vm["loglevel"].as<std::string>()));
+        LOG_SET_LEVEL(vm["loglevel"].as<std::string>());
     }
 
     seastar::app_template::seastar_options opts;
     opts.reactor_opts.poll_mode.set_value();
     opts.smp_opts.smp.set_value(1);
+    if (vm.count("cpu")) {
+        opts.smp_opts.cpuset.set_value({vm["cpu"].as<unsigned>()});
+    }
     seastar::app_template app(std::move(opts));
     char* args[1] = {argv[0]};
     return app.run(
@@ -91,15 +92,15 @@ int main(int argc, char** argv) {
                                   path, 1, snail::stream::DevType::HDD, 1)
                                   .get();
                     if (!ok) {
-                        SPDLOG_ERROR("format {} error", path);
+                        LOG_ERROR("format {} error", path);
                     } else {
-                        SPDLOG_INFO("format {} success", path);
+                        LOG_INFO("format {} success", path);
                     }
                     return;
                 }
 
                 if (!vm.count("disk")) {
-                    SPDLOG_ERROR("not found disk path");
+                    LOG_ERROR("not found disk path");
                     return;
                 }
                 std::string disk_path = vm["disk"].as<std::string>();

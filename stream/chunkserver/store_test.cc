@@ -9,12 +9,16 @@
 #include <seastar/testing/thread_test_case.hh>
 
 #include "net/byteorder.h"
-#include "spdlog/spdlog.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace stream {
 
-SEASTAR_THREAD_TEST_CASE(write_on_block) {
+SEASTAR_THREAD_TEST_CASE(sample_test) {
+    auto ok = snail::stream::Store::Format("/dev/sdb", 1,
+                                           snail::stream::DevType::HDD, 1)
+                  .get0();
+    BOOST_REQUIRE(ok);
     auto store = Store::Load("/dev/sdb", DevType::HDD).get0();
     BOOST_REQUIRE(store);
 
@@ -56,21 +60,54 @@ SEASTAR_THREAD_TEST_CASE(write_on_block) {
     iov.push_back({buf.get_write(), 32256});
     buf_vec.emplace_back(std::move(buf));
     for (int i = 0; i < 128; i++) {
-        buf = seastar::temporary_buffer<char>::aligned(kMemoryAlignment, 32768);
-        net::BigEndian::PutUint32(
-            buf.get_write() + 32764,
-            crc32_gzip_refl(
-                0, reinterpret_cast<const unsigned char*>(buf.get()), 32764));
-        iov.push_back({buf.get_write(), 32768});
+        buf = seastar::temporary_buffer<char>::aligned(kMemoryAlignment,
+                                                       kBlockSize);
+        uint32_t crc = crc32_gzip_refl(
+            0, reinterpret_cast<const unsigned char*>(buf.get()),
+            kBlockDataSize);
+        net::BigEndian::PutUint32(buf.get_write() + kBlockDataSize, crc);
+        iov.push_back({buf.get_write(), buf.size()});
         buf_vec.emplace_back(std::move(buf));
     }
     s = store->WriteBlocks(extent_ptr, off, std::move(iov)).get0();
     BOOST_REQUIRE(s.OK());
     buf_vec.clear();
-    SPDLOG_INFO("extent len={}", extent_ptr->len);
+    BOOST_REQUIRE_EQUAL(extent_ptr->len, 4226556);
 
-    // s = store->RemoveExtent(extent_id).get0();
-    // BOOST_REQUIRE(s.OK());
+    off = extent_ptr->len;
+    buf = seastar::temporary_buffer<char>::aligned(kMemoryAlignment, 32565);
+    uint32_t crc = crc32_gzip_refl(
+        0, reinterpret_cast<const unsigned char*>(buf.get()), 32561);
+    net::BigEndian::PutUint32(buf.get_write() + 32561, crc);
+    iov.push_back({buf.get_write(), buf.size()});
+    s = store->WriteBlocks(extent_ptr, off, std::move(iov)).get0();
+    BOOST_REQUIRE(s.OK());
+    buf_vec.clear();
+    BOOST_REQUIRE_EQUAL(extent_ptr->len, 4259117);
+
+    for (uint64_t off = 0; off < extent_ptr->len; off += kBlockDataSize) {
+        auto st = store->ReadBlock(extent_ptr, off).get0();
+        if (!st.OK()) {
+            LOG_ERROR("read block off={} error: {}", off, st.String());
+        }
+        BOOST_REQUIRE(st.OK());
+    }
+
+    size_t read_bytes = 0;
+    s = store
+            ->ReadBlocks(extent_ptr, 0, 4225251,
+                         [&read_bytes](
+                             std::vector<seastar::temporary_buffer<char>> datas)
+                             -> Status<> {
+                             Status<> st;
+                             for (int i = 0; i < datas.size(); i++) {
+                                 read_bytes += datas[i].size() - 4;
+                             }
+                             return st;
+                         })
+            .get0();
+    BOOST_REQUIRE_EQUAL(read_bytes, 4225251);
+
     store->Close().get();
 }
 

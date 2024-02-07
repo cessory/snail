@@ -1,0 +1,47 @@
+syntax="proto3";
+package snail.stream;
+
+import "common.proto";
+
+message WriteExtentReq {
+    CommonReq base = 1;
+    uint32 diskid = 2;
+    string extent_id = 3;
+    uint64 off = 4;
+    uint64 len = 5; 
+}
+
+message ReadExtentReq {
+    CommonReq base = 1;
+    uint32 diskid = 2;
+    string extent_id = 3;
+    uint64 off = 4;
+    uint64 len = 5; 
+}
+
+message ReadExtentResp{
+    CommonResp base = 1;
+    uint64 len = 2;
+}
+
+message DeleteExtentReq {
+    CommonResp base = 1;
+    string extent_id = 2;
+}
+
+message GetExtentReq {
+    CommonResp base = 1;
+    string extent_id = 2;
+}
+
+message GetExtentResp {
+    CommonResp base = 1;
+    uint64 len = 2;
+    uint32 ctime = 3;
+}
+
+message UpdateDiskStatusReq {
+    CommonResp base = 1;
+    uint32 diskid = 2;
+    uint32 status = 3;
+}

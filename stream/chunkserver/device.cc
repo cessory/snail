@@ -5,8 +5,8 @@
 #include <seastar/core/seastar.hh>
 #include <seastar/core/when_all.hh>
 
-#include "spdlog/spdlog.h"
 #include "types.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace stream {
@@ -29,7 +29,7 @@ class KernelDevice : public Device {
                 co_await seastar::open_file_dma(name, seastar::open_flags::rw);
             ptr->capacity_ = co_await ptr->fp_.size();
         } catch (std::exception& e) {
-            SPDLOG_ERROR("open disk {} error: {}", name, e.what());
+            LOG_ERROR("open disk {} error: {}", name, e.what());
             if (ptr->fp_) {
                 co_await ptr->fp_.close();
             }
@@ -168,8 +168,8 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                 == req->dev_ptr->ns_id_ {
                     auto ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
                     if (!spdk_nvme_ns_is_active(ns)) {
-                        SPDLOG_ERROR("device {} ns: {} is not active",
-                                     trid->traddr, nsid)
+                        LOG_ERROR("device {} ns: {} is not active",
+                                  trid->traddr, nsid)
                         req->pr.set_value(-1);
                         return
                     }
@@ -212,7 +212,7 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
         spdk_nvme_trid_populate_transport(&ptr->trid_,
                                           SPDK_NVME_TRANSPORT_PCIE);
         if (0 != spdk_nvme_transport_id_parse(&ptr->trid_, name.c_str())) {
-            SPDLOG_ERROR("error parsing transport address");
+            LOG_ERROR("error parsing transport address");
             co_return nullptr;
         }
 
@@ -249,9 +249,9 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                         SpdkDevice::request* r =
                             reinterpret_cast<SpdkDevice::request*>(arg);
                         if (spdk_nvme_cpl_is_error(completion)) {
-                            SPDLOG_ERROR("I/O error status: {}",
-                                         spdk_nvme_cpl_get_status_string(
-                                             &completion->status));
+                            LOG_ERROR("I/O error status: {}",
+                                      spdk_nvme_cpl_get_status_string(
+                                          &completion->status));
                             r->pr.set_value(-1);
                             return
                         }
@@ -289,7 +289,7 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                 SpdkDevice::request* r =
                     reinterpret_cast<SpdkDevice::request*>(arg);
                 if (spdk_nvme_cpl_is_error(completion)) {
-                    SPDLOG_ERROR(
+                    LOG_ERROR(
                         "I/O error status: {}",
                         spdk_nvme_cpl_get_status_string(&completion->status));
                     r->pr.set_value((int)ErrCode::ErrDisk);

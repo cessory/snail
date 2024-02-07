@@ -81,27 +81,33 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
 
     ~Store() {}
 
-    uint32_t DeviceId() const;
+    uint32_t DeviceId() const { return super_block_.dev_id; }
 
     seastar::future<Status<>> CreateExtent(ExtentID id);
 
-    // 同时写入多个block
+    // 同时写入多个block数据, 包含crc
     // 中间的block必须是全部填满block大小
+    // 该函数不负责crc的正确性检查
     seastar::future<Status<>> WriteBlocks(ExtentPtr extent_ptr, uint64_t offset,
                                           std::vector<iovec> iov);
 
     // 读取一个block的数据
     // off - 必须block对齐(32k -4)
-    // 返回一个block的实际数据, 包含crc
+    // 返回一个block的物理数据, 包含crc
     seastar::future<Status<seastar::temporary_buffer<char>>> ReadBlock(
         ExtentPtr extent_ptr, uint64_t off);
 
-    // 读取多个block的数据
+    // 读取多个block的数据, 每读完一个chunk, 会调用一次callback
     // off - 必须block对齐(32k -4)
-    // n   - block的个数
-    // 返回多个block的实际数据, 包含crc, 最后一个block可能不足32k-4
-    seastar::future<Status<std::vector<seastar::temporary_buffer<char>>>>
-    ReadBlocks(ExtentPtr extent_ptr, uint64_t off, uint32_t n);
+    // len   - 数据长度, off+len不能超过extent的数据长度,
+    // 需要上层根据extent的实际长度计算好.
+    // callback - 读取数据的回调函数
+    // 返回的最后一个块的数据可能不足32k
+    seastar::future<Status<>> ReadBlocks(
+        ExtentPtr extent_ptr, uint64_t off, size_t len,
+        seastar::noncopyable_function<
+            Status<>(std::vector<seastar::temporary_buffer<char>>)>
+            callback);
 
     seastar::future<Status<>> RemoveExtent(ExtentID id);
 

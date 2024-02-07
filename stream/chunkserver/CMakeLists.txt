@@ -6,7 +6,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -g -O2")
 find_package(Seastar REQUIRED)
 
 include_directories(../)
-add_definitions(-DSPDLOG_ACTIVE_LEVEL=0 -DSPDLOG_FMT_EXTERNAL)
+add_definitions(-DSPDLOG_FMT_EXTERNAL)
 add_library(obj OBJECT store.cc ../util/status.cc device.cc log.cc super_block.cc types.cc)
 target_link_libraries(obj isal Seastar::seastar)
 

@@ -13,7 +13,7 @@
 #include <system_error>
 
 #include "net/byteorder.h"
-#include "spdlog/spdlog.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace stream {
@@ -48,14 +48,14 @@ inline static size_t ChunkPhyLen(const ChunkEntry& chunk) {
 static bool InvalidSuperBlock(const std::string_view& name,
                               const SuperBlock& super_block) {
     if (super_block.magic != kMagic) {
-        SPDLOG_ERROR("device {} superblock has invalid magic({})", name,
-                     super_block.magic);
+        LOG_ERROR("device {} superblock has invalid magic({})", name,
+                  super_block.magic);
         return false;
     }
 
     if (super_block.version != kVersion) {
-        SPDLOG_ERROR("device {} superblock has invalid version({})", name,
-                     super_block.version);
+        LOG_ERROR("device {} superblock has invalid version({})", name,
+                  super_block.version);
         return false;
     }
 
@@ -63,7 +63,7 @@ static bool InvalidSuperBlock(const std::string_view& name,
     for (int i = 0; i < MAX_PT; i++) {
         if (super_block.pt[i].start != off ||
             (super_block.pt[i].size & kChunkSizeMask)) {
-            SPDLOG_ERROR(
+            LOG_ERROR(
                 "device {} superblock has invalid pt({}) start={} size={}",
                 name, i, super_block.pt[i].start, super_block.pt[i].size);
             return false;
@@ -85,8 +85,8 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
         auto st =
             co_await dev_ptr->Read(off, buffer.get_write(), buffer.size());
         if (!st.OK()) {
-            SPDLOG_ERROR("read device {} extent meta error: {}", name,
-                         st.String());
+            LOG_ERROR("read device {} extent meta error: {}", name,
+                      st.String());
             s.Set(st.Code(), st.Reason());
             co_return s;
         }
@@ -97,7 +97,7 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
             if (crc32_gzip_refl(0,
                                 reinterpret_cast<const unsigned char*>(p + 4),
                                 len + 2) != crc) {
-                SPDLOG_ERROR(
+                LOG_ERROR(
                     "read device {} extent meta error: invalid checksum extent "
                     "index={}",
                     name, index);
@@ -107,7 +107,7 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
             auto extent_ptr = seastar::make_lw_shared<Extent>();
             extent_ptr->Unmarshal(p + 6);
             if (extent_ptr->index != index) {
-                SPDLOG_ERROR(
+                LOG_ERROR(
                     "read device {} extent meta error: invalid index "
                     "index={} expect index={}",
                     name, extent_ptr->index, index);
@@ -134,8 +134,7 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
         auto st =
             co_await dev_ptr->Read(off, buffer.get_write(), buffer.size());
         if (!st.OK()) {
-            SPDLOG_ERROR("read device {} chunk meta error: {}", name,
-                         st.String());
+            LOG_ERROR("read device {} chunk meta error: {}", name, st.String());
             s.Set(st.Code(), st.Reason());
             co_return s;
         }
@@ -146,7 +145,7 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
             if (crc32_gzip_refl(0,
                                 reinterpret_cast<const unsigned char*>(p + 4),
                                 len + 2) != crc) {
-                SPDLOG_ERROR("device {} chunk meta has invalid checksum", name);
+                LOG_ERROR("device {} chunk meta has invalid checksum", name);
                 s.Set(ErrCode::ErrInvalidChecksum);
                 co_return s;
             }
@@ -154,7 +153,7 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
             ChunkEntry chunk;
             chunk.Unmarshal(p + 6);
             if (chunk.index != index) {
-                SPDLOG_ERROR(
+                LOG_ERROR(
                     "device {} chunk meta has invalid index, index={} expect "
                     "index={}",
                     name, chunk.index, index);
@@ -183,7 +182,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
             dev_ptr = co_await OpenSpdkDevice(name);
             break;
         default:
-            SPDLOG_ERROR("invalid dev type");
+            LOG_ERROR("invalid dev type");
             break;
     }
     if (!dev_ptr) {
@@ -193,7 +192,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
     auto tmp = dev_ptr->Get(kSectorSize);
     auto s = co_await dev_ptr->Read(0, tmp.get_write(), tmp.size());
     if (!s.OK()) {
-        SPDLOG_ERROR("read device {} superblock error: {}", name, s.String());
+        LOG_ERROR("read device {} superblock error: {}", name, s.String());
         co_await dev_ptr->Close();
         co_return nullptr;
     }
@@ -201,14 +200,14 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
     uint32_t crc = net::BigEndian::Uint32(tmp.get());
     uint32_t len = net::BigEndian::Uint16(tmp.get() + 4);
     if (len + 6 > kSectorSize) {
-        SPDLOG_ERROR("device {} superblock has invalid len({})", name, len);
+        LOG_ERROR("device {} superblock has invalid len({})", name, len);
         co_await dev_ptr->Close();
         co_return nullptr;
     }
     if (crc != crc32_gzip_refl(
                    0, reinterpret_cast<const unsigned char*>(tmp.get() + 4),
                    len + 2)) {
-        SPDLOG_ERROR("device {} superblock has invaid checksum", name);
+        LOG_ERROR("device {} superblock has invaid checksum", name);
         co_await dev_ptr->Close();
         co_return nullptr;
     }
@@ -219,13 +218,13 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
         co_await dev_ptr->Close();
         co_return nullptr;
     }
-    SPDLOG_INFO(
+    LOG_INFO(
         "device-{} get super block ver={} capacity={} cluster_id={} dev_id={}",
         dev_ptr->Name(), super_block.version, super_block.capacity,
         super_block.cluster_id, super_block.dev_id);
     for (int i = 0; i < MAX_PT; i++) {
-        SPDLOG_INFO("device-{} pt[{}] start={} size={}", dev_ptr->Name(), i,
-                    super_block.pt[i].start, super_block.pt[i].size);
+        LOG_INFO("device-{} pt[{}] start={} size={}", dev_ptr->Name(), i,
+                 super_block.pt[i].start, super_block.pt[i].size);
     }
 
     store->dev_ptr_ = dev_ptr;
@@ -264,8 +263,8 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
                 s.Set(ErrCode::ErrUnExpect, "not found extent index");
                 return s;
             }
-            SPDLOG_INFO("load a extent from log extent-{}.{} index={}",
-                        ent.id.hi, ent.id.lo, ent.index);
+            LOG_INFO("load a extent from log extent-{}.{} index={}", ent.id.hi,
+                     ent.id.lo, ent.index);
             auto extent_ptr = iter->second;
             extent_ptr->id = ent.id;
             extent_ptr->chunk_idx = ent.chunk_idx;
@@ -277,13 +276,13 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
                 s.Set(ErrCode::ErrUnExpect, "not found chunk index");
                 return s;
             }
-            SPDLOG_INFO("load a chunk from log index={} next={} len={}",
-                        ent.index, ent.next, ent.len);
+            LOG_INFO("load a chunk from log index={} next={} len={}", ent.index,
+                     ent.next, ent.len);
             chunk_ht[ent.index] = ent;
             return s;
         });
     if (!s3.OK()) {
-        SPDLOG_ERROR("device {} init log error: {}", name, s3.String());
+        LOG_ERROR("device {} init log error: {}", name, s3.String());
         co_await dev_ptr->Close();
         co_return nullptr;
     }
@@ -299,7 +298,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
         while (next != -1) {
             auto it = chunk_ht.find(next);
             if (it == chunk_ht.end()) {
-                SPDLOG_ERROR("invalid next({}) chunk index", next);
+                LOG_ERROR("invalid next({}) chunk index", next);
                 co_await store->Close();
                 co_return nullptr;
             }
@@ -334,7 +333,7 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
             dev_ptr = co_await OpenSpdkDevice(name);
             break;
         default:
-            SPDLOG_ERROR("invalid dev type");
+            LOG_ERROR("invalid dev type");
             break;
     }
     if (!dev_ptr) {
@@ -353,8 +352,8 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     capacity = seastar::align_down(capacity, kChunkSize);
     if (log_cap == 0 || capacity == 0 ||
         (kChunkSize + 2 * log_cap) >= capacity) {
-        SPDLOG_ERROR("device {} capacity: {} log_cap: {} capacity is too small",
-                     name, capacity, log_cap);
+        LOG_ERROR("device {} capacity: {} log_cap: {} capacity is too small",
+                  name, capacity, log_cap);
         co_await dev_ptr->Close();
         co_return false;
     }
@@ -362,8 +361,8 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     size_t chunk_n =
         (capacity - kChunkSize - 2 * log_cap) / (kChunkSize + 1024);
     if (chunk_n == 0) {
-        SPDLOG_ERROR("device {} capacity: {} log_cap: {} not enough chunks",
-                     name, capacity, log_cap);
+        LOG_ERROR("device {} capacity: {} log_cap: {} not enough chunks", name,
+                  capacity, log_cap);
         co_await dev_ptr->Close();
         co_return false;
     }
@@ -371,7 +370,7 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
         seastar::align_up(chunk_n * kSectorSize, kChunkSize);
     size_t chunk_meta_size = extent_meta_size;
     if (capacity <= kChunkSize + 2 * chunk_meta_size + 2 * log_cap) {
-        SPDLOG_ERROR(
+        LOG_ERROR(
             "device {} capacity: {} log_cap: {} extent_meta_size: {} "
             "chunk_meta_size: {} capacity is too small",
             name, capacity, log_cap, extent_meta_size, chunk_meta_size);
@@ -404,7 +403,7 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
         super_block.pt[LOGB_PT].start + super_block.pt[LOGB_PT].size;
     super_block.pt[DATA_PT].size = data_size;
 
-    SPDLOG_INFO(
+    LOG_INFO(
         "device {} capacity: {} extent_meta: (start={} size={}) "
         "chunk_meta: (start={} size={}) loga: (start={} size={}) logb: "
         "(start={} size={}) data: (start={}, size={})",
@@ -435,13 +434,13 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
         }
         auto s = co_await dev_ptr->Write(off, buffer.get(), buffer.size());
         if (!s.OK()) {
-            SPDLOG_ERROR("device {} format extent meta error: {}", name,
-                         s.String());
+            LOG_ERROR("device {} format extent meta error: {}", name,
+                      s.String());
             co_await dev_ptr->Close();
             co_return false;
         }
     }
-    SPDLOG_INFO("device {} format extent meta success!", name);
+    LOG_INFO("device {} format extent meta success!", name);
 
     // format chunk meta
     index = 0;
@@ -462,13 +461,13 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
         }
         auto s = co_await dev_ptr->Write(off, buffer.get(), buffer.size());
         if (!s.OK()) {
-            SPDLOG_ERROR("device {} format chunk meta error: {}", name,
-                         s.String());
+            LOG_ERROR("device {} format chunk meta error: {}", name,
+                      s.String());
             co_await dev_ptr->Close();
             co_return false;
         }
     }
-    SPDLOG_INFO("device {} format chunk meta success!", name);
+    LOG_INFO("device {} format chunk meta success!", name);
 
     // format loga and logb
     memset(buffer.get_write(), 0, buffer.size());
@@ -477,12 +476,12 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
          off += kBlockSize) {
         auto s = co_await dev_ptr->Write(off, buffer.get(), buffer.size());
         if (!s.OK()) {
-            SPDLOG_ERROR("device {} format log error: {}", name, s.String());
+            LOG_ERROR("device {} format log error: {}", name, s.String());
             co_await dev_ptr->Close();
             co_return false;
         }
     }
-    SPDLOG_INFO("device {} format log success!", name);
+    LOG_INFO("device {} format log success!", name);
 
     // format superblock
     net::BigEndian::PutUint16(buffer.get_write() + 4, kSuperBlockSize);
@@ -495,10 +494,10 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     auto s = co_await dev_ptr->Write(0, buffer.get(), kSectorSize);
     co_await dev_ptr->Close();
     if (!s.OK()) {
-        SPDLOG_ERROR("device {} save superblock error: {}", name, s.String());
+        LOG_ERROR("device {} save superblock error: {}", name, s.String());
         co_return false;
     }
-    SPDLOG_INFO("device {} save superblock success!", name);
+    LOG_INFO("device {} save superblock success!", name);
     co_return true;
 }
 
@@ -524,7 +523,7 @@ seastar::future<Status<>> Store::AllocChunk(ExtentPtr extent_ptr) {
         }
         extent_ptr->chunk_idx = new_chunk.index;
         extent_ptr->chunks.push_back(new_chunk);
-        SPDLOG_INFO(
+        LOG_INFO(
             "push new chunk(index={} next={} len={}) (index={} next={} len={})",
             new_chunk.index, new_chunk.next, new_chunk.len,
             extent_ptr->chunks.back().index, extent_ptr->chunks.back().next,
@@ -549,10 +548,10 @@ seastar::future<Status<>> Store::AllocChunk(ExtentPtr extent_ptr) {
         chunk.next = chunk_idx;
         extent_ptr->chunks.push_back(new_chunk);
     }
-    SPDLOG_INFO("alloc chunk(index={} next={} len={}) for extent={}-{}",
-                extent_ptr->chunks.back().index, extent_ptr->chunks.back().next,
-                extent_ptr->chunks.back().len, chunk_idx, extent_ptr->id.hi,
-                extent_ptr->id.lo);
+    LOG_INFO("alloc chunk(index={} next={} len={}) for extent={}-{}",
+             extent_ptr->chunks.back().index, extent_ptr->chunks.back().next,
+             extent_ptr->chunks.back().len, chunk_idx, extent_ptr->id.hi,
+             extent_ptr->id.lo);
     co_return s;
 }
 
@@ -617,7 +616,7 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
 
     if (creating_extents_.count(id) == 1 || extents_.count(id) == 1) {
         s.Set(ErrCode::ErrExistExtent);
-        SPDLOG_ERROR("extent-{}-{} has already exist", id.hi, id.lo);
+        LOG_ERROR("extent-{}-{} has already exist", id.hi, id.lo);
         co_return s;
     }
 
@@ -628,8 +627,8 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
     extent_ptr->store = shared_from_this();
     if (free_extents_.empty() || free_chunks_.empty()) {
         s.Set(ENOSPC);
-        SPDLOG_ERROR("there is not enouth space to create extent-{}-{}", id.hi,
-                     id.lo);
+        LOG_ERROR("there is not enouth space to create extent-{}-{}", id.hi,
+                  id.lo);
         co_return s;
     }
 
@@ -639,7 +638,7 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
 
     s = co_await AllocChunk(extent_ptr);
     if (!s.OK()) {
-        SPDLOG_ERROR("create extent-{}-{} error: {}", id.hi, id.lo, s.String());
+        LOG_ERROR("create extent-{}-{} error: {}", id.hi, id.lo, s.String());
         co_return s;
     }
     extents_[id] = extent_ptr;
@@ -651,15 +650,15 @@ Status<> Store::HandleFirst(ChunkEntry& chunk, int io_n, char* b, size_t len,
                             std::vector<iovec>& tmp_io_vec, uint64_t& offset,
                             std::string& last_sector_data) {
     Status<> s;
-    uint32_t last_block_crc = chunk.crc;
     uint64_t last_block_len = chunk.len % kBlockDataSize;
+    uint32_t last_block_crc = (last_block_len == 0 ? 0 : chunk.crc);
     size_t last_sector_size = last_block_len & kSectorSizeMask;
 
     if (len <= 4 || kBlockSize - last_block_len < len ||
         (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
         // io的数据长度不能跨block
-        SPDLOG_ERROR("invalid argument data address={} data len={}",
-                     (uint64_t)b, len);
+        LOG_ERROR("invalid argument data address={} data len={}", (uint64_t)b,
+                  len);
         s.Set(EINVAL);
         return s;
     }
@@ -671,7 +670,7 @@ Status<> Store::HandleFirst(ChunkEntry& chunk, int io_n, char* b, size_t len,
         size_t crc_len = (block_full ? 4 : 0);
         if (kSectorSize - last_sector_size - crc_len < len - 4) {
             // 第一个io的长度不能超过sector大小
-            SPDLOG_ERROR(
+            LOG_ERROR(
                 "data len={} is larger than the last sector free size, the "
                 "last "
                 "sector free size={}",
@@ -681,7 +680,7 @@ Status<> Store::HandleFirst(ChunkEntry& chunk, int io_n, char* b, size_t len,
         }
         if (io_n > 1 && kSectorSize - last_sector_size - crc_len != len - 4) {
             // 如果不止一个io, 第一个io必须把sector填满
-            SPDLOG_ERROR(
+            LOG_ERROR(
                 "data len={} is not equal the last sector free size, the last "
                 "sector free size={}",
                 len - 4, kSectorSize - last_sector_size - crc_len);
@@ -732,7 +731,7 @@ Status<> Store::HandleFirst(ChunkEntry& chunk, int io_n, char* b, size_t len,
     }
     if (io_n > 1 && kBlockSize - last_block_len != len) {
         // 如果有多个io, 第一个io必须能够把block填满
-        SPDLOG_ERROR(
+        LOG_ERROR(
             "data len={} is not equal the last sector free size, the last "
             "sector free size={}",
             len, kSectorSize - last_sector_size);
@@ -774,15 +773,15 @@ Status<> Store::HandleIO(ChunkEntry& chunk, int io_n, char* b, size_t len,
                          std::vector<iovec>& tmp_io_vec,
                          std::string& last_sector_data, int i) {
     Status<> s;
-    uint32_t last_block_crc = chunk.crc;
     uint64_t last_block_len = chunk.len % kBlockDataSize;
+    uint32_t last_block_crc = (last_block_len == 0 ? 0 : chunk.crc);
     uint64_t last_block_free = kBlockSize - last_block_len;
     size_t last_sector_size = last_block_len & kSectorSizeMask;
 
     if (len <= 4 || kBlockSize - last_block_len < len ||
         (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
         // io的数据长度不能跨block
-        SPDLOG_ERROR(
+        LOG_ERROR(
             "invalid argument data address={} data len={}, last_block_len={}",
             (uint64_t)b, len, last_block_len);
         s.Set(EINVAL);
@@ -809,7 +808,7 @@ Status<> Store::HandleIO(ChunkEntry& chunk, int io_n, char* b, size_t len,
         }
         if ((len & kSectorSizeMask) || last_block_free != len) {
             // 不是最后一个io, 数据长度必须对齐sector, 且必须填满block
-            SPDLOG_ERROR(
+            LOG_ERROR(
                 "data len={} doesn't fill up block or aligned to sector size, "
                 "the last block free "
                 "size={}",
@@ -876,8 +875,9 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
                                              std::vector<iovec> iov) {
     Status<> s;
     if (offset != extent_ptr->len) {
-        SPDLOG_ERROR("extent({}-{}) is over write, offset={} len={}", id.hi,
-                     id.lo, offset, extent_ptr->len);
+        LOG_ERROR("extent({}-{}) is over write, offset={} len={}",
+                  extent_ptr->id.hi, extent_ptr->id.lo, offset,
+                  extent_ptr->len);
         s.Set(ErrCode::ErrOverWrite);
         co_return s;
     }
@@ -890,16 +890,16 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
         0 == (kChunkSize - ChunkPhyLen(extent_ptr->chunks.back()))) {
         s = co_await AllocChunk(extent_ptr);
         if (!s.OK()) {
-            SPDLOG_ERROR("extent({}-{}) alloc chunk error: {}", id.hi, id.lo,
-                         s.String());
+            LOG_ERROR("extent({}-{}) alloc chunk error: {}", extent_ptr->id.hi,
+                      extent_ptr->id.lo, s.String());
             co_return s;
         }
     }
 
     auto st = co_await GetLastSectorData(extent_ptr);
     if (!st.OK()) {
-        SPDLOG_ERROR("extent({}-{}) get last sector data error: {}", id.hi,
-                     id.lo, s.String());
+        LOG_ERROR("extent({}-{}) get last sector data error: {}",
+                  extent_ptr->id.hi, extent_ptr->id.lo, s.String());
         s.Set(st.Code(), st.Reason());
         co_return s;
     }
@@ -931,25 +931,28 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
                          tmp_buf_vec, tmp_io_vec, last_sector_data, i);
         }
         if (!s.OK()) {
-            SPDLOG_ERROR("device-{} handle {}th io error: {}", dev_ptr_->Name(),
-                         i, s.String());
+            LOG_ERROR("device-{} handle {}th io error: {}", dev_ptr_->Name(), i,
+                      s.String());
             free_chunks(chunks);
             co_return s;
+        }
+        if (last_sector_data.empty()) {
+            chunk.scrc = 0;
         }
         chunks.back() = chunk;  // update the last chunk
         if ((kChunkSize - ChunkPhyLen(chunk)) == 0) {
             s = co_await dev_ptr_->Write(offset, std::move(tmp_io_vec));
             if (!s.OK()) {
-                SPDLOG_ERROR("device-{} write data error: {}", dev_ptr_->Name(),
-                             s.String());
+                LOG_ERROR("device-{} write data error: {}", dev_ptr_->Name(),
+                          s.String());
                 free_chunks(chunks);
                 co_return s;
             }
             if (i != n - 1) {
                 if (free_chunks_.empty()) {
                     s.Set(ENOSPC);
-                    SPDLOG_ERROR("device-{} error: {}", dev_ptr_->Name(),
-                                 s.String());
+                    LOG_ERROR("device-{} error: {}", dev_ptr_->Name(),
+                              s.String());
                     free_chunks(chunks);
                     co_return s;
                 }
@@ -969,8 +972,8 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     if (!tmp_io_vec.empty()) {
         s = co_await dev_ptr_->Write(offset, std::move(tmp_io_vec));
         if (!s.OK()) {
-            SPDLOG_ERROR("device-{} write data error: {}", dev_ptr_->Name(),
-                         s.String());
+            LOG_ERROR("device-{} write data error: {}", dev_ptr_->Name(),
+                      s.String());
             free_chunks(chunks);
             co_return s;
         }
@@ -991,8 +994,8 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     for (auto& r : res) {
         if (!r.OK()) {
             s.Set(r.Code(), r.Reason());
-            SPDLOG_ERROR("device-{} save chunk meta error: {}",
-                         dev_ptr_->Name(), s.String());
+            LOG_ERROR("device-{} save chunk meta error: {}", dev_ptr_->Name(),
+                      s.String());
             free_chunks(chunks);
             co_return s;
         }
@@ -1015,70 +1018,114 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     co_return s;
 }
 
-seastar::future<Status<std::vector<seastar::temporary_buffer<char>>>>
-Store::ReadBlocks(ExtentPtr extent_ptr, uint64_t off, uint32_t n) {
-    Status<std::vector<seastar::temporary_buffer<char>>> s;
-    std::vector<seastar::temporary_buffer<char>> buffer_vec;
+seastar::future<Status<>> Store::ReadBlocks(
+    ExtentPtr extent_ptr, uint64_t off, size_t len,
+    seastar::noncopyable_function<
+        Status<>(std::vector<seastar::temporary_buffer<char>>)>
+        callback) {
+    Status<> s;
 
     if (off % kBlockDataSize) {
         s.Set(EINVAL);
         co_return s;
     }
-    if (n == 0) {
+    if (len == 0) {
         co_return s;
     }
 
-    if (off >= extent_ptr->len) {
+    if (off + len > extent_ptr->len) {
+        s.Set(ERANGE);
         co_return s;
     }
 
+    size_t last_block_len = len % kBlockDataSize;  // 最后一个block的数据长度
+
+    uint32_t blocks =
+        (len + kBlockDataSize - 1) / kBlockDataSize;  // total block number
     auto chunks = extent_ptr->chunks;
     int chunk_idx = off / kChunkDataSize;
     auto chunk = chunks[chunk_idx];
-    if (chunk_off > chunk.len) {
-        s.Set(ErrCode::ErrUnExpect, "invalid chunk len");
-        co_return s;
-    }
-
-    std::vector < seastar::future<Status<size_t>> fu_vec;
-    std::vector<size_t> buffer_size_vec;
     size_t chunk_off = off % kChunkDataSize;
-    for (int i = chunk_idx; i < chunks.size() && n > 0; i++) {
+
+    std::vector<seastar::temporary_buffer<char>> buffer_vec;
+
+    for (int i = chunk_idx; i < chunks.size() && blocks > 0; i++) {
         size_t chunk_len = chunks[i].len - chunk_off;
-        uint32_t block_n =
-            (chunk_len + kBlockDataSize - 1) / (kBlockDataSize - 1);
-        block_n = std::min(block_n, n);
+        //该chunk的block个数
+        uint32_t block_n = (chunk_len + kBlockDataSize - 1) / kBlockDataSize;
+        block_n = std::min(block_n, blocks);
         size_t real_off = chunk_off / kBlockDataSize * kBlockSize +
                           chunk_off % kBlockDataSize;
         uint64_t phy_off =
             super_block_.DataOffset() + chunks[i].index * kChunkSize + real_off;
+
+        //物理空间长度
         chunk_len = chunk_len / kBlockDataSize * kBlockSize +
                     chunk_len % kBlockDataSize;
-        if (chunk_len % kBlockDataSize) {
-            chunk_len += 4;
+        size_t buffer_len = std::min(block_n * kBlockSize, chunk_len);
+        size_t need_read_bytes = seastar::align_up(buffer_len, kSectorSize);
+        if (buffer_len & kBlockSizeMask) {
+            buffer_len += 4;  //最后一个数据块的crc
         }
-        buffer_size_vec.push_back(chunk_len);
-        chunk_len = std::min(block_n * kBlockSize, chunk_len);
+        auto buf = dev_ptr_->Get(need_read_bytes);
 
-        auto buf = dev_ptr_->Get(seastar::align_up(chunk_len, kSectorSize));
-        auto fu = dev_ptr_->Read(phy_off, buf.get_write(), buf.size());
-        fu_vec.push_back(std::move(fu));
-        n -= block_n;
-        buffer_vec.emplace_back(std::move(buf));
+        auto st =
+            co_await dev_ptr_->Read(phy_off, buf.get_write(), need_read_bytes);
+        if (!st.OK()) {
+            s.Set(st.Code(), st.Reason());
+            break;
+        }
+        blocks -= block_n;
         chunk_off = 0;
+        if (st.Value() != need_read_bytes) {
+            s.Set(ErrCode::ErrUnExpect, "read unexcept bytes");
+            break;
+        }
+
+        // check crc
+        char* p = buf.get_write();
+        for (uint32_t j = 0; j < block_n; j++, p += kBlockSize) {
+            size_t data_len = std::min(kBlockSize, buffer_len);
+            uint32_t crc = crc32_gzip_refl(
+                0, reinterpret_cast<const unsigned char*>(p), data_len - 4);
+            if (data_len != kBlockSize) {
+                net::BigEndian::PutUint32(p + data_len - 4, chunks[i].crc);
+            }
+            buffer_len -= data_len;
+            uint32_t origin_crc =
+                (data_len == kBlockSize
+                     ? net::BigEndian::Uint32(p + data_len - 4)
+                     : chunks[i].crc);
+            if (crc != origin_crc) {
+                s.Set(ErrCode::ErrInvalidChecksum);
+                co_return s;
+            }
+            if (blocks > 0) {
+                buffer_vec.emplace_back(
+                    std::move(buf.share(j * kBlockSize, data_len)));
+            } else if ((last_block_len + 4) < data_len) {
+                auto buffer = buf.share(j * kBlockSize, last_block_len + 4);
+                crc = crc32_gzip_refl(
+                    0, reinterpret_cast<const unsigned char*>(buffer.get()),
+                    last_block_len);
+                net::BigEndian::PutUint32(buffer.get_write() + last_block_len,
+                                          crc);
+                buffer_vec.emplace_back(std::move(buffer));
+            } else if ((last_block_len + 4) == data_len) {
+                buffer_vec.emplace_back(
+                    std::move(buf.share(j * kBlockSize, data_len)));
+            } else {
+                // never reach to here
+                s.Set(ErrCode::ErrUnExpect, "invalid data len");
+                co_return s;
+            }
+        }
+        s = callback(std::move(buffer_vec));
+        if (!s.OK()) {
+            break;
+        }
     }
 
-    auto res = co_await when_all_succeed(fu_vec.begin(), fu_vec.end());
-    for (int i = 0; i < res.size(); i++) {
-        if (!res[i].OK()) {
-            s.Set(res[i].Code(), res[i].Reason());
-            break;
-        }
-        if (res[i].Value() != buffer_vec[i].size()) {
-            s.Set(ErrCode::ErrUnExpect, "read unexpect bytes");
-            break;
-        }
-    }
     co_return s;
 }
 
@@ -1092,17 +1139,20 @@ seastar::future<Status<seastar::temporary_buffer<char>>> Store::ReadBlock(
     }
 
     if (off >= extent_ptr->len) {
+        s.Set(ERANGE);
         co_return s;
     }
 
-    auto chunk = extent_ptr->chunks[off / kChunkDataSize];
+    uint32_t chunk_idx = off / kChunkDataSize;
+    auto chunk = extent_ptr->chunks[chunk_idx];
     size_t chunk_off = off % kChunkDataSize;
     if (chunk_off > chunk.len) {
         s.Set(ErrCode::ErrUnExpect, "invalid chunk len");
         co_return s;
     }
     size_t block_index = chunk_off / kBlockDataSize;
-    off = super_block_.DataOffset() * chunk.index + block_index * kBlockSize;
+    off = super_block_.DataOffset() + kChunkSize * chunk.index +
+          block_index * kBlockSize;
 
     size_t len = std::min(kBlockDataSize, chunk.len - chunk_off);
     auto buffer = dev_ptr_->Get(seastar::align_up(len + 4, kSectorSize));
@@ -1117,6 +1167,7 @@ seastar::future<Status<seastar::temporary_buffer<char>>> Store::ReadBlock(
     if (len < kBlockDataSize) {
         net::BigEndian::PutUint32(buffer.get_write() + len, chunk.crc);
         origin_crc = chunk.crc;
+        LOG_INFO("read data len={} off={} crc={}", len, off, origin_crc);
     } else {
         origin_crc = net::BigEndian::Uint32(buffer.get() + len);
     }
@@ -1125,7 +1176,8 @@ seastar::future<Status<seastar::temporary_buffer<char>>> Store::ReadBlock(
     if (crc != origin_crc) {
         s.Set(ErrCode::ErrInvalidChecksum);
     } else {
-        s.SetValue(std::move(buffer.share(0, len + 4)));
+        buffer.trim(len + 4);
+        s.SetValue(std::move(buffer));
     }
     co_return s;
 }

@@ -78,6 +78,8 @@ class Status<T> {
         return *this;
     }
 
+    explicit operator bool() const noexcept { return code_ == ErrCode::OK; }
+
     bool OK() const { return code_ == ErrCode::OK; }
 
     void Set(ErrCode code) {
@@ -164,6 +166,8 @@ class Status<> {
         }
         return *this;
     }
+
+    explicit operator bool() const noexcept { return code_ == ErrCode::OK; }
 
     bool OK() const { return code_ == ErrCode::OK; }
 

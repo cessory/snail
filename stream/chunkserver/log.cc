@@ -6,7 +6,7 @@
 #include <seastar/core/do_with.hh>
 
 #include "net/byteorder.h"
-#include "spdlog/spdlog.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace stream {
@@ -87,8 +87,8 @@ seastar::future<Status<>> Log::Init(
         auto st = co_await dev_ptr_->Read(super_.pt[LOGA_PT + i].start,
                                           buf.get_write(), kSectorSize);
         if (!st.OK()) {
-            SPDLOG_ERROR("read log head from device {} log-{} error: {}",
-                         dev_ptr_->Name(), i, st.String());
+            LOG_ERROR("read log head from device {} log-{} error: {}",
+                      dev_ptr_->Name(), i, st.String());
             s.Set(st.Code(), st.Reason());
             co_return s;
         }
@@ -96,14 +96,14 @@ seastar::future<Status<>> Log::Init(
         ver[i] = net::BigEndian::Uint64(buf.get() + 4);
         flags[i] = *(buf.get() + 12);
         if (crc == 0 && ver[i] == 0) {
-            SPDLOG_INFO("device-{} log-{} is emtpy", dev_ptr_->Name(), i);
+            LOG_INFO("device-{} log-{} is emtpy", dev_ptr_->Name(), i);
             continue;
         }
         if (crc32_gzip_refl(
                 0, reinterpret_cast<const unsigned char *>(buf.get() + 4),
                 kHeaderSize - 4) != crc) {
-            SPDLOG_ERROR("device-{} log-{} log head has invalid checksum",
-                         dev_ptr_->Name(), i);
+            LOG_ERROR("device-{} log-{} log head has invalid checksum",
+                      dev_ptr_->Name(), i);
             co_return Status<>(ErrCode::ErrInvalidChecksum);
         }
     }
@@ -117,19 +117,18 @@ seastar::future<Status<>> Log::Init(
         version_ = ver[index[i]];
 
         if (version_ == 0 || flags[index[i]] != 0) {
-            SPDLOG_INFO("device-{} log-{} don't need to reload",
-                        dev_ptr_->Name(), index[i]);
+            LOG_INFO("device-{} log-{} don't need to reload", dev_ptr_->Name(),
+                     index[i]);
             continue;
         }
-        SPDLOG_INFO("device-{} log-{} reload......", dev_ptr_->Name(),
-                    index[i]);
+        LOG_INFO("device-{} log-{} reload......", dev_ptr_->Name(), index[i]);
 
         while (offset < super_.pt[pt_n].start + super_.pt[pt_n].size) {
             auto st =
                 co_await dev_ptr_->Read(offset, buf.get_write(), buf.size());
             if (!st.OK()) {
-                SPDLOG_ERROR("device-{} log-{} read error: {}, offset={}",
-                             dev_ptr_->Name(), index[i], st.String(), offset);
+                LOG_ERROR("device-{} log-{} read error: {}, offset={}",
+                          dev_ptr_->Name(), index[i], st.String(), offset);
                 s.Set(st.Code(), st.Reason());
                 co_return s;
             }
@@ -170,9 +169,9 @@ seastar::future<Status<>> Log::Init(
                             kRecordHeaderSize + len - 4) !=
                         crc) {  // invalid record
                         s.Set(ErrCode::ErrInvalidChecksum);
-                        SPDLOG_ERROR("device-{} log-{} error: {}, offset={}",
-                                     dev_ptr_->Name(), index[i], s.String(),
-                                     offset);
+                        LOG_ERROR("device-{} log-{} error: {}, offset={}",
+                                  dev_ptr_->Name(), index[i], s.String(),
+                                  offset);
                         co_return s;
                     }
                     if (version != version_) {
@@ -252,7 +251,7 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
             uint64_t off =
                 super_.pt[CHUNK_PT].start + first_index * kSectorSize;
             co_await sem.wait();
-            SPDLOG_INFO("write off={}, len={}", off, buffer_len);
+            LOG_INFO("write off={}, len={}", off, buffer_len);
             (void)seastar::do_with(std::move(buffer.share(0, buffer_len)),
                                    [this, &sem, &s, off](auto &buf) {
                                        return dev_ptr_
@@ -274,7 +273,7 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
     }
     co_await sem.wait(parallel_submit);
     if (!s.OK()) {
-        SPDLOG_ERROR("save chunk meta error: {}", s.String());
+        LOG_ERROR("save chunk meta error: {}", s.String());
         co_return s;
     }
 
@@ -282,7 +281,7 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
         uint64_t off = super_.pt[CHUNK_PT].start + first_index * kSectorSize;
         s = co_await dev_ptr_->Write(off, buffer.get(), buffer_len);
         if (!s.OK()) {
-            SPDLOG_ERROR(
+            LOG_ERROR(
                 "save chunk meta error: {}, off={}, first_index={}, len={}",
                 s.String(), off, first_index, buffer_len);
         }
@@ -355,15 +354,15 @@ seastar::future<Status<>> Log::BackgroundFlush(uint64_t ver,
 
     s = co_await SaveImmuChunks();
     if (!s.OK()) {
-        SPDLOG_ERROR("device-{} save chunk meta error: {}", dev_ptr_->Name(),
-                     s.String());
+        LOG_ERROR("device-{} save chunk meta error: {}", dev_ptr_->Name(),
+                  s.String());
         status_ = s;
         co_return s;
     }
     s = co_await SaveImmuExtents();
     if (!s.OK()) {
-        SPDLOG_ERROR("device-{} save extent meta error: {}", dev_ptr_->Name(),
-                     s.String());
+        LOG_ERROR("device-{} save extent meta error: {}", dev_ptr_->Name(),
+                  s.String());
         status_ = s;
         co_return s;
     }
@@ -378,8 +377,8 @@ seastar::future<Status<>> Log::BackgroundFlush(uint64_t ver,
     net::BigEndian::PutUint32(buf.get_write(), crc);
     s = co_await dev_ptr_->Write(head_offset, buf.get(), kSectorSize);
     if (!s.OK()) {
-        SPDLOG_ERROR("device-{} save log head error: {}", dev_ptr_->Name(),
-                     s.String());
+        LOG_ERROR("device-{} save log head error: {}", dev_ptr_->Name(),
+                  s.String());
         status_ = s;
         co_return s;
     }
@@ -440,7 +439,7 @@ seastar::future<> Log::LoopRun() {
             s = co_await dev_ptr_->Write(
                 offset_, buffer.get(),
                 seastar::align_up(buffer_len, kSectorSize));
-            SPDLOG_INFO("write log offset={} len={}", offset_, buffer_len);
+            LOG_INFO("write log offset={} len={}", offset_, buffer_len);
         }
         if (s.OK()) {
             offset_ += seastar::align_up(buffer_len, kSectorSize);
@@ -520,7 +519,7 @@ seastar::future<Status<>> Log::SaveChunk(const ChunkEntry &chunk) {
     s = co_await ptr->pr.get_future().then([](Status<> st) {
         return seastar::make_ready_future<Status<>>(std::move(st));
     });
-    SPDLOG_INFO(
+    LOG_DEBUG(
         "save chunk (index={}, next={}, len={}, crc={}, scrc={}) success!",
         chunk.index, chunk.next, chunk.len, chunk.crc, chunk.scrc);
     co_return s;
@@ -543,8 +542,8 @@ seastar::future<Status<>> Log::SaveExtent(const ExtentEntry &extent) {
     s = co_await ptr->pr.get_future().then([](Status<> st) {
         return seastar::make_ready_future<Status<>>(std::move(st));
     });
-    SPDLOG_INFO("save extent (index={}, id={}-{}, chunk_idx={}) success!",
-                extent.index, extent.id.hi, extent.id.lo, extent.chunk_idx);
+    LOG_DEBUG("save extent (index={}, id={}-{}, chunk_idx={}) success!",
+              extent.index, extent.id.hi, extent.id.lo, extent.chunk_idx);
     co_return s;
 }
 
