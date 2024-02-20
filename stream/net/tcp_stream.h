@@ -1,4 +1,6 @@
 #pragma once
+#include <sys/uio.h>
+
 #include <queue>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
@@ -58,10 +60,7 @@ class Stream {
     explicit Stream(uint32_t id, uint8_t ver, uint16_t frame_size,
                     SessionPtr sess);
 
-    ~Stream() {
-        sess_.release();
-        std::cout << "stream id=" << id_ << " deconstructer" << std::endl;
-    }
+    ~Stream() { sess_.release(); }
 
     static StreamPtr make_stream(uint32_t id, uint8_t ver, uint16_t frame_size,
                                  SessionPtr sess);
@@ -71,7 +70,9 @@ class Stream {
     seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(
         int timeout = -1);
 
-    seastar::future<Status<>> WriteFrame(char *b, int n);
+    seastar::future<Status<>> WriteFrame(const char *b, size_t n);
+
+    seastar::future<Status<>> WriteFrame(std::vector<iovec> iov);
 
     seastar::future<> Close();
 };

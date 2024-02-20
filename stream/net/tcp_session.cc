@@ -28,6 +28,7 @@ Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
                  std::unique_ptr<BufferAllocator> allocator)
     : opt_(opt),
       conn_(std::move(conn)),
+      client_(client),
       allocator_(allocator ? allocator.release()
                            : dynamic_cast<BufferAllocator *>(
                                  new DefaultBufferAllocator())),
@@ -166,6 +167,7 @@ seastar::future<> Session::RecvLoop() {
 seastar::future<> Session::SendLoop() {
     static uint32_t max_packet_num = IOV_MAX;
     auto ptr = shared_from_this();
+
     auto defer = seastar::defer([this] {
         conn_->Close();
         CloseAllStreams();
@@ -186,6 +188,7 @@ seastar::future<> Session::SendLoop() {
             }
         }
     });
+
     while (!die_ && status_.OK()) {
         Status<> s;
         std::queue<Session::write_request *> sent_q;
@@ -194,8 +197,8 @@ seastar::future<> Session::SendLoop() {
         for (int i = 0; i < write_q_.size(); i++) {
             while (!write_q_[i].empty() && packet_n < max_packet_num) {
                 auto req = write_q_[i].front();
-                if (req->frame.data.size() > 0) {
-                    packet_n += 2;
+                if (req->frame.packet.nr_frags() > 0) {
+                    packet_n += 1 + req->frame.packet.nr_frags();
                 } else {
                     packet_n += 1;
                 }
@@ -208,13 +211,11 @@ seastar::future<> Session::SendLoop() {
                 *hdr.get_write() = req->frame.ver;
                 *(hdr.get_write() + 1) = req->frame.cmd;
                 LittleEndian::PutUint16(hdr.get_write() + 2,
-                                        (uint16_t)(req->frame.data.size()));
+                                        (uint16_t)(req->frame.packet.len()));
                 LittleEndian::PutUint32(hdr.get_write() + 4, req->frame.sid);
-                packet =
-                    seastar::net::packet(std::move(packet), std::move(hdr));
-                if (req->frame.data.size() > 0) {
-                    packet = seastar::net::packet(std::move(packet),
-                                                  std::move(req->frame.data));
+                packet.append(std::move(hdr));
+                if (req->frame.packet.nr_frags() > 0) {
+                    packet.append(std::move(req->frame.packet));
                 }
             }
         }
@@ -246,7 +247,7 @@ seastar::future<> Session::SendLoop() {
 }
 
 void Session::StartKeepalive() {
-    if (opt_.keep_alive_enable) {
+    if (opt_.keep_alive_enable && client_) {
         keepalive_timer_.set_callback([this]() { WritePing(); });
         keepalive_timer_.rearm_periodic(
             std::chrono::seconds(opt_.keep_alive_interval));
@@ -272,16 +273,15 @@ seastar::future<Status<>> Session::WriteFrameInternal(Frame f,
         co_return s;
     }
 
-    write_request *req = new write_request();
+    std::unique_ptr<write_request> req(new write_request());
 
     req->classid = classid;
     req->frame = std::move(f);
     req->pr = seastar::promise<Status<>>();
 
-    write_q_[static_cast<int>(classid)].emplace(req);
+    write_q_[static_cast<int>(classid)].emplace(req.get());
     w_cv_.signal();
     s = co_await req->pr.value().get_future();
-    delete req;
     co_return s;
 }
 

@@ -116,14 +116,15 @@ seastar::future<Status<>> Stream::SendWindowUpdate(uint32_t consumed) {
     f.ver = ver_;
     f.cmd = CmdType::UPD;
     f.sid = id_;
-    f.data = seastar::temporary_buffer<char>(8);
-    LittleEndian::PutUint32(f.data.get_write(), consumed);
-    LittleEndian::PutUint32(f.data.get_write() + 4,
+    auto data = seastar::temporary_buffer<char>(8);
+    LittleEndian::PutUint32(data.get_write(), consumed);
+    LittleEndian::PutUint32(data.get_write() + 4,
                             sess_->opt_.max_stream_buffer);
+    f.packet = std::move(seastar::net::packet(std::move(data)));
     return sess_->WriteFrameInternal(std::move(f), Session::ClassID::DATA);
 }
 
-seastar::future<Status<>> Stream::WriteFrame(char *b, int n) {
+seastar::future<Status<>> Stream::WriteFrame(std::vector<iovec> iov) {
     Status<> s;
 
     if (die_ || has_fin_) {
@@ -131,10 +132,21 @@ seastar::future<Status<>> Stream::WriteFrame(char *b, int n) {
         co_return s;
     }
 
-    if (n > frame_size_ || n < 0) {
+    if (iov.size() >= IOV_MAX) {
         s.Set(EMSGSIZE);
         co_return s;
-    } else if (n == 0) {
+    }
+
+    seastar::net::packet packet;
+    for (int i = 0; i < iov.size(); ++i) {
+        seastar::net::packet p(reinterpret_cast<const char *>(iov[i].iov_base),
+                               iov[i].iov_len);
+        packet.append(std::move(p));
+    }
+    if (packet.len() > frame_size_) {
+        s.Set(EMSGSIZE);
+        co_return s;
+    } else if (packet.len() == 0) {
         co_return s;
     }
 
@@ -151,15 +163,20 @@ seastar::future<Status<>> Stream::WriteFrame(char *b, int n) {
             win = static_cast<int32_t>(remote_wnd_) - inflight;
         }
     }
-    sent_bytes_ += n;
+    sent_bytes_ += packet.len();
     Frame frame;
     frame.ver = ver_;
     frame.cmd = CmdType::PSH;
     frame.sid = id_;
-    frame.data = seastar::temporary_buffer<char>(b, n, seastar::deleter());
+    frame.packet = std::move(packet);
     s = co_await sess_->WriteFrameInternal(std::move(frame),
                                            Session::ClassID::DATA);
     co_return s;
+}
+
+seastar::future<Status<>> Stream::WriteFrame(const char *b, size_t n) {
+    iovec iov = {(void *)b, n};
+    return WriteFrame({iov});
 }
 
 void Stream::Update(uint32_t consumed, uint32_t window) {

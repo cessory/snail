@@ -19,7 +19,7 @@ namespace net {
 
 struct Option {
     uint8_t version = 2;
-    bool keep_alive_enable = false;
+    bool keep_alive_enable = true;
     int keep_alive_interval = 10;  // unit: s
     uint16_t max_frame_size = 65535;
     uint32_t max_receive_buffer = 67108864;  // 64M
@@ -35,6 +35,7 @@ class BufferAllocator {
 class Session : public seastar::enable_lw_shared_from_this<Session> {
     Option opt_;
     TcpConnectionPtr conn_;
+    bool client_;
     std::unique_ptr<BufferAllocator> allocator_;
     uint32_t next_id_;
 

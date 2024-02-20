@@ -1,5 +1,5 @@
 #pragma once
-
+#include <seastar/net/packet.hh>
 namespace snail {
 namespace net {
 
@@ -19,7 +19,7 @@ struct Frame {
     uint8_t ver = 0;
     uint8_t cmd = 0;
     uint32_t sid = 0;
-    seastar::temporary_buffer<char> data;
+    seastar::net::packet packet;
 
     Frame() = default;
     Frame(const Frame&) = delete;
@@ -29,7 +29,7 @@ struct Frame {
         ver = x.ver;
         cmd = x.cmd;
         sid = x.sid;
-        data = std::move(x.data);
+        packet = std::move(x.packet);
     }
 
     Frame& operator=(Frame&& x) {
@@ -37,7 +37,7 @@ struct Frame {
             ver = x.ver;
             cmd = x.cmd;
             sid = x.sid;
-            data = std::move(x.data);
+            packet = std::move(x.packet);
         }
         return *this;
     }
