@@ -3,6 +3,23 @@ package snail.stream;
 
 import "common.proto";
 
+enum DatanodeMsgType {
+    WRITE_EXTENT_REQ = 0;
+    WRITE_EXTENT_RESP = 1;
+
+    READ_EXTENT_REQ = 2;
+    READ_EXTENT_RESP = 3;
+
+    DELETE_EXTENT_REQ = 4; 
+    DELETE_EXTENT_RESP = 5; 
+
+    GET_EXTENT_REQ = 6; 
+    GET_EXTENT_RESP = 7; 
+
+    UPDATE_DISK_STATUS_REQ = 8;
+    UPDATE_DISK_STATUS_RESP = 9;
+}
+
 message WriteExtentReq {
     CommonReq base = 1;
     uint32 diskid = 2;
@@ -26,12 +43,14 @@ message ReadExtentResp{
 
 message DeleteExtentReq {
     CommonResp base = 1;
-    string extent_id = 2;
+    uint32 diskid = 2;
+    string extent_id = 3;
 }
 
 message GetExtentReq {
     CommonResp base = 1;
-    string extent_id = 2;
+    uint32 diskid = 2;
+    string extent_id = 3;
 }
 
 message GetExtentResp {

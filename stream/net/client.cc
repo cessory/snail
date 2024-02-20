@@ -15,7 +15,10 @@ seastar::future<> test_stream(snail::net::StreamPtr stream) {
     for (;;) {
         std::vector<seastar::future<snail::Status<>>> fu_vec;
         for (int i = 0; i < 8; i++) {
-            auto ft = stream->WriteFrame(data.get_write(), data.size());
+            std::vector<iovec> iov;
+            iov.push_back({data.get_write(), data.size() - 4});
+            iov.push_back({data.get_write() + data.size() - 4, 4});
+            auto ft = stream->WriteFrame(std::move(iov));
             fu_vec.emplace_back(std::move(ft));
         }
         auto res_vec =
