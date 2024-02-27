@@ -20,10 +20,11 @@ namespace net {
 struct Option {
     uint8_t version = 2;
     bool keep_alive_enable = true;
-    int keep_alive_interval = 10;  // unit: s
-    uint16_t max_frame_size = 65535;
-    uint32_t max_receive_buffer = 67108864;  // 64M
-    uint32_t max_stream_buffer = 262144;     // 256 K
+    int keep_alive_interval = 10;           // unit: s
+    int write_timeout_s = 10;               // unit: s
+    uint16_t max_frame_size = 32768;        // 32K
+    uint32_t max_receive_buffer = 4194304;  // 4M
+    uint32_t max_stream_buffer = 262144;    // 256 K
 };
 
 class BufferAllocator {

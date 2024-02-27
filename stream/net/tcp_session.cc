@@ -24,6 +24,14 @@ class DefaultBufferAllocator : public BufferAllocator {
     }
 };
 
+static bool IsValidOpt(const Option &opt) {
+    if (opt.version != 2) {
+        return false;
+    }
+
+    return true;
+}
+
 Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
                  std::unique_ptr<BufferAllocator> allocator)
     : opt_(opt),
@@ -167,6 +175,8 @@ seastar::future<> Session::RecvLoop() {
 seastar::future<> Session::SendLoop() {
     static uint32_t max_packet_num = IOV_MAX;
     auto ptr = shared_from_this();
+    seastar::timer<seastar::steady_clock_type> write_timer;
+    write_timer.set_callback([this] { conn_->Close(); });
 
     auto defer = seastar::defer([this] {
         conn_->Close();
@@ -220,7 +230,11 @@ seastar::future<> Session::SendLoop() {
             }
         }
         if (packet.len() > 0) {
+            if (opt_.write_timeout_s > 0) {
+                write_timer.arm(std::chrono::seconds(opt_.write_timeout_s));
+            }
             s = co_await conn_->Write(std::move(packet));
+            write_timer.cancel();
             while (!sent_q.empty()) {
                 auto req = sent_q.front();
                 sent_q.pop();
@@ -354,24 +368,15 @@ seastar::future<Status<StreamPtr>> Session::AcceptStream() {
         }
         if (accept_q_.empty()) {
             co_await accept_cv_.wait();
+            continue;
         }
-
-        if (die_) {
-            s.Set(EPIPE);
-            break;
-        }
-        if (!status_.OK()) {
-            s.Set(status_.Code(), status_.Reason());
-            break;
-        }
-
-        if (!accept_q_.empty()) {
-            auto stream = accept_q_.front();
-            accept_q_.pop();
-            accept_sem_.signal();
-            s.SetValue(stream);
-            break;
-        }
+        break;
+    }
+    if (!accept_q_.empty()) {
+        auto stream = accept_q_.front();
+        accept_q_.pop();
+        accept_sem_.signal();
+        s.SetValue(stream);
     }
     co_return s;
 }
