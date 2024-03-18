@@ -139,8 +139,8 @@ seastar::future<Status<>> Stream::WriteFrame(std::vector<iovec> iov) {
 
     seastar::net::packet packet;
     for (int i = 0; i < iov.size(); ++i) {
-        seastar::net::packet p(reinterpret_cast<const char *>(iov[i].iov_base),
-                               iov[i].iov_len);
+        seastar::net::packet p = seastar::net::packet::from_static_data(
+            reinterpret_cast<const char *>(iov[i].iov_base), iov[i].iov_len);
         packet.append(std::move(p));
     }
     if (packet.len() > frame_size_) {

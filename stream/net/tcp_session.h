@@ -24,7 +24,7 @@ struct Option {
     int write_timeout_s = 10;               // unit: s
     uint16_t max_frame_size = 32768;        // 32K
     uint32_t max_receive_buffer = 4194304;  // 4M
-    uint32_t max_stream_buffer = 262144;    // 256 K
+    uint32_t max_stream_buffer = 1048576;   // 1M
 };
 
 class BufferAllocator {
