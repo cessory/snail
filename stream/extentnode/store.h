@@ -40,6 +40,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     DevicePtr dev_ptr_;
     SuperBlock super_block_;
     uint64_t used_ = 0;
+    DevStatus dev_status_ = DevStatus::NORMAL;
     std::unordered_map<ExtentID, ExtentPtr> extents_;
     std::unordered_set<ExtentID> creating_extents_;
     std::queue<uint32_t> free_extents_;
@@ -83,6 +84,10 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
 
     uint32_t DeviceId() const { return super_block_.dev_id; }
 
+    DevStatus GetStatus() const { return dev_status_; }
+
+    void SetStatus(DevStatus status) { dev_status_ = status; }
+
     seastar::future<Status<>> CreateExtent(ExtentID id);
 
     // 同时写入多个block数据, 包含crc
@@ -97,25 +102,21 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     seastar::future<Status<seastar::temporary_buffer<char>>> ReadBlock(
         ExtentPtr extent_ptr, uint64_t off);
 
-    // 读取多个block的数据, 每读完一个chunk, 会调用一次callback
+    // 读取多个block的数据
     // off - 必须block对齐(32k -4)
     // len   - 数据长度, off+len不能超过extent的数据长度,
     // 需要上层根据extent的实际长度计算好.
-    // callback - 读取数据的回调函数
     // 返回的最后一个块的数据可能不足32k
-    seastar::future<Status<>> ReadBlocks(
-        ExtentPtr extent_ptr, uint64_t off, size_t len,
-        seastar::noncopyable_function<
-            Status<>(std::vector<seastar::temporary_buffer<char>>)>
-            callback);
+    seastar::future<Status<std::vector<TmpBuffer>>> ReadBlocks(
+        ExtentPtr extent_ptr, uint64_t off, size_t len);
 
     seastar::future<Status<>> RemoveExtent(ExtentID id);
 
     ExtentPtr GetExtent(const ExtentID& id);
 
-    uint64_t Capacity() const;
+    uint64_t Capacity() const { return super_block_.capacity; }
 
-    uint64_t Used() const;
+    uint64_t Used() const { return used_; }
 
     seastar::future<> Close();
 };

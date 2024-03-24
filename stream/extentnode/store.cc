@@ -1018,12 +1018,10 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     co_return s;
 }
 
-seastar::future<Status<>> Store::ReadBlocks(
-    ExtentPtr extent_ptr, uint64_t off, size_t len,
-    seastar::noncopyable_function<
-        Status<>(std::vector<seastar::temporary_buffer<char>>)>
-        callback) {
-    Status<> s;
+seastar::future<Status<std::vector<TmpBuffer>>> Store::ReadBlocks(
+    ExtentPtr extent_ptr, uint64_t off, size_t len) {
+    Status<std::vector<TmpBuffer>> s;
+    std::vector<TmpBuffer> result;
 
     if (off % kBlockDataSize) {
         s.Set(EINVAL);
@@ -1046,8 +1044,6 @@ seastar::future<Status<>> Store::ReadBlocks(
     int chunk_idx = off / kChunkDataSize;
     auto chunk = chunks[chunk_idx];
     size_t chunk_off = off % kChunkDataSize;
-
-    std::vector<seastar::temporary_buffer<char>> buffer_vec;
 
     for (int i = chunk_idx; i < chunks.size() && blocks > 0; i++) {
         size_t chunk_len = chunks[i].len - chunk_off;
@@ -1101,7 +1097,7 @@ seastar::future<Status<>> Store::ReadBlocks(
                 co_return s;
             }
             if (blocks > 0) {
-                buffer_vec.emplace_back(
+                result.emplace_back(
                     std::move(buf.share(j * kBlockSize, data_len)));
             } else if ((last_block_len + 4) < data_len) {
                 auto buffer = buf.share(j * kBlockSize, last_block_len + 4);
@@ -1110,9 +1106,9 @@ seastar::future<Status<>> Store::ReadBlocks(
                     last_block_len);
                 net::BigEndian::PutUint32(buffer.get_write() + last_block_len,
                                           crc);
-                buffer_vec.emplace_back(std::move(buffer));
+                result.emplace_back(std::move(buffer));
             } else if ((last_block_len + 4) == data_len) {
-                buffer_vec.emplace_back(
+                result.emplace_back(
                     std::move(buf.share(j * kBlockSize, data_len)));
             } else {
                 // never reach to here
@@ -1120,11 +1116,8 @@ seastar::future<Status<>> Store::ReadBlocks(
                 co_return s;
             }
         }
-        s = callback(std::move(buffer_vec));
-        if (!s.OK()) {
-            break;
-        }
     }
+    s.SetValue(std::move(result));
 
     co_return s;
 }
@@ -1219,10 +1212,6 @@ ExtentPtr Store::GetExtent(const ExtentID& id) {
     }
     return it->second;
 }
-
-uint64_t Store::Capacity() const { return super_block_.capacity; }
-
-uint64_t Store::Used() const { return used_; }
 
 seastar::future<> Store::Close() {
     if (log_ptr_) {

@@ -5,8 +5,8 @@
 #include <seastar/core/thread.hh>
 #include <seastar/core/when_all.hh>
 
-#include "tcp_connection.h"
-#include "tcp_session.h"
+#include "net/tcp_connection.h"
+#include "net/tcp_session.h"
 
 namespace bpo = boost::program_options;
 

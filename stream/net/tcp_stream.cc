@@ -1,9 +1,9 @@
-#include "tcp_stream.h"
+#include "net/tcp_stream.h"
 
 #include <seastar/core/coroutine.hh>
 
-#include "byteorder.h"
-#include "tcp_session.h"
+#include "net/byteorder.h"
+#include "net/tcp_session.h"
 
 namespace snail {
 namespace net {

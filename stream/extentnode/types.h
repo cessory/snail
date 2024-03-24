@@ -6,6 +6,8 @@
 #include <seastar/core/temporary_buffer.hh>
 #include <vector>
 
+#include "net/byteorder.h"
+
 namespace snail {
 namespace stream {
 
@@ -23,6 +25,7 @@ constexpr size_t kBlockSizeMask = kBlockSize - 1;
 constexpr size_t kBlockDataSize = 32764;
 constexpr int kLastBlockIndex = 127;  // the last block index in the chunk
 constexpr int kLastSectorIndex = 63;  // the last sector index in the block
+constexpr size_t kMetaMsgHeaderLen = 4 + 2 + 2;  // crc + type + body len
 
 using TmpBuffer = seastar::temporary_buffer<char>;
 
@@ -32,6 +35,13 @@ enum class DevType {
     NVME_KERNEL,
     NVME_SPDK,
     PMEM,
+};
+
+enum class DevStatus {
+    NORMAL,
+    RDONLY,
+    BROKEN,
+    MAX,
 };
 
 struct ExtentID {
@@ -64,6 +74,15 @@ struct ExtentID {
 
     inline bool operator==(const ExtentID& x) const {
         return (hi == x.hi && lo == x.lo);
+    }
+
+    bool Parse(const std::string& str) {
+        if (str.size() != 16) {
+            return false;
+        }
+        hi = net::BigEndian::Uint64(str.c_str());
+        lo = net::BigEndian::Uint64(str.c_str() + 8);
+        return true;
     }
 
     inline bool Empty() const { return (hi == 0 && lo == 0); }
