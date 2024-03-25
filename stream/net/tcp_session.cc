@@ -1,11 +1,11 @@
-#include "net/tcp_session.h"
+#include "tcp_session.h"
 
 #include <limits.h>
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/util/defer.hh>
 
-#include "net/byteorder.h"
+#include "byteorder.h"
 
 namespace snail {
 namespace net {

@@ -1,4 +1,4 @@
-#include "store.h"
+#include "extentnode/store.h"
 
 #include <isa-l.h>
 
@@ -94,18 +94,11 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
     }
 
     size_t read_bytes = 0;
-    s = store
-            ->ReadBlocks(extent_ptr, 0, 4225251,
-                         [&read_bytes](
-                             std::vector<seastar::temporary_buffer<char>> datas)
-                             -> Status<> {
-                             Status<> st;
-                             for (int i = 0; i < datas.size(); i++) {
-                                 read_bytes += datas[i].size() - 4;
-                             }
-                             return st;
-                         })
-            .get0();
+    auto st = store->ReadBlocks(extent_ptr, 0, 4225251).get0();
+    auto datas = std::move(st.Value());
+    for (int i = 0; i < datas.size(); i++) {
+        read_bytes += datas[i].size() - 4;
+    }
     BOOST_REQUIRE_EQUAL(read_bytes, 4225251);
 
     store->Close().get();
