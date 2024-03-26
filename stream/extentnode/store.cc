@@ -887,7 +887,7 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     }
 
     if (extent_ptr->chunks.empty() ||
-        0 == (kChunkSize - ChunkPhyLen(extent_ptr->chunks.back()))) {
+        kChunkDataSize == extent_ptr->chunks.back().len) {
         s = co_await AllocChunk(extent_ptr);
         if (!s.OK()) {
             LOG_ERROR("extent({}-{}) alloc chunk error: {}", extent_ptr->id.hi,
