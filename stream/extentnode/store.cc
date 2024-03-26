@@ -903,7 +903,7 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
         s.Set(st.Code(), st.Reason());
         co_return s;
     }
-    std::string last_sector_data = st.Value();
+    std::string last_sector_data = std::move(st.Value());
 
     ChunkEntry chunk = extent_ptr->chunks.back();
     std::vector<TmpBuffer> tmp_buf_vec;

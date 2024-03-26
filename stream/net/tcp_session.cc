@@ -372,7 +372,7 @@ seastar::future<Status<StreamPtr>> Session::AcceptStream() {
         }
         break;
     }
-    if (!accept_q_.empty()) {
+    if (!accept_q_.empty() && s) {
         auto stream = accept_q_.front();
         accept_q_.pop();
         accept_sem_.signal();
