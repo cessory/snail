@@ -521,11 +521,6 @@ seastar::future<Status<>> Store::AllocChunk(ExtentPtr extent_ptr) {
         }
         extent_ptr->chunk_idx = new_chunk.index;
         extent_ptr->chunks.push_back(new_chunk);
-        LOG_INFO(
-            "push new chunk(index={} next={} len={}) (index={} next={} len={})",
-            new_chunk.index, new_chunk.next, new_chunk.len,
-            extent_ptr->chunks.back().index, extent_ptr->chunks.back().next,
-            extent_ptr->chunks.back().len);
     } else {
         ChunkEntry& chunk = extent_ptr->chunks.back();
         ChunkEntry new_chunk(chunk_idx);
@@ -546,10 +541,6 @@ seastar::future<Status<>> Store::AllocChunk(ExtentPtr extent_ptr) {
         chunk.next = chunk_idx;
         extent_ptr->chunks.push_back(new_chunk);
     }
-    LOG_INFO("alloc chunk(index={} next={} len={}) for extent={}-{}",
-             extent_ptr->chunks.back().index, extent_ptr->chunks.back().next,
-             extent_ptr->chunks.back().len, extent_ptr->id.hi,
-             extent_ptr->id.lo);
     co_return s;
 }
 
@@ -646,132 +637,6 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
     co_return s;
 }
 
-Status<> Store::HandleFirst(ChunkEntry& chunk, int io_n, char* b, size_t len,
-                            std::vector<TmpBuffer>& tmp_buf_vec,
-                            std::vector<iovec>& tmp_io_vec, uint64_t& offset,
-                            std::string& last_sector_data) {
-    Status<> s;
-    uint64_t last_block_len = chunk.len % kBlockDataSize;
-    uint32_t last_block_crc = (last_block_len == 0 ? 0 : chunk.crc);
-    size_t last_sector_size = last_block_len & kSectorSizeMask;
-
-    LOG_INFO("chunk len={} last_block_len={}, last_sector_size={}", chunk.len,
-             last_block_len, last_sector_size);
-    if (len <= 4 || kBlockSize - last_block_len < len ||
-        (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
-        // io的数据长度不能跨block
-        LOG_ERROR("invalid argument data address={} data len={}", (uint64_t)b,
-                  len);
-        s.Set(EINVAL);
-        return s;
-    }
-
-    if (last_sector_size != 0) {
-        // 非sector对齐写, 需要先拷贝原来的数据
-        bool block_full =
-            (((chunk.len + len - 4) % kBlockDataSize) == 0 ? true : false);
-        size_t crc_len = (block_full ? 4 : 0);
-        if (kSectorSize - last_sector_size - crc_len < len - 4) {
-            // 第一个io的长度不能超过sector大小
-            LOG_ERROR(
-                "data len={} is larger than the last sector free size, the "
-                "last "
-                "sector free size={}",
-                len - 4, kSectorSize - last_sector_size - crc_len);
-            s.Set(EINVAL);
-            return s;
-        }
-        if (io_n > 1 && kSectorSize - last_sector_size - crc_len != len - 4) {
-            // 如果不止一个io, 第一个io必须把sector填满
-            LOG_ERROR(
-                "data len={} is not equal the last sector free size, the last "
-                "sector free size={}",
-                len - 4, kSectorSize - last_sector_size - crc_len);
-            s.Set(EINVAL);
-            return s;
-        }
-        if (last_sector_data.size() != last_sector_size) {
-            s.Set(ErrCode::ErrUnExpect, "last sector data size is invalid");
-            return s;
-        }
-        auto tmp = dev_ptr_->Get(kSectorSize);
-        memcpy(tmp.get_write(), last_sector_data.c_str(),
-               last_sector_data.size());
-        memcpy(tmp.get_write() + last_sector_data.size(), b, len - 4);
-        last_block_crc = crc32_gzip_refl(
-            last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
-        chunk.crc = last_block_crc;
-        chunk.len += len - 4;
-        offset -= last_sector_data.size();
-
-        if (block_full) {
-            net::BigEndian::PutUint32(
-                tmp.get_write() + last_sector_data.size() + len - 4,
-                last_block_crc);
-            last_sector_data.clear();
-        } else {
-            size_t sector_remain =
-                (last_sector_data.size() + len - 4) & kSectorSizeMask;
-            if (sector_remain > 0) {
-                last_sector_data =
-                    std::string_view(tmp.get() + last_sector_data.size() + len -
-                                         4 - sector_remain,
-                                     sector_remain);
-            } else {
-                last_sector_data.clear();
-            }
-        }
-
-        tmp_io_vec.push_back({tmp.get_write(), tmp.size()});
-        tmp_buf_vec.emplace_back(std::move(tmp));
-        return s;
-    }
-
-    // 写入的位置是sector对齐的
-    if (last_sector_data.size() != 0) {
-        s.Set(ErrCode::ErrUnExpect, "last sector data is not empty");
-        return s;
-    }
-    if (io_n > 1 && kBlockSize - last_block_len != len) {
-        // 如果有多个io, 第一个io必须能够把block填满
-        LOG_ERROR(
-            "data len={} is not equal the last sector free size, the last "
-            "sector free size={}",
-            len, kSectorSize - last_sector_size);
-        s.Set(EINVAL);
-        return s;
-    }
-    last_block_crc = crc32_gzip_refl(
-        last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
-    // 修改crc
-    net::BigEndian::PutUint32(b + len - 4, last_block_crc);
-    if (len & kSectorSizeMask) {
-        // 数据没有按512对齐, 这是最后一个io
-        size_t aligned_size = len / kSectorSize * kSectorSize;
-        size_t remain_size = len & kSectorSizeMask;
-        if (aligned_size > 0) {
-            tmp_io_vec.push_back({b, aligned_size});
-        }
-        auto tmp = dev_ptr_->Get(kSectorSize);
-        memcpy(tmp.get_write(), b + aligned_size, remain_size);
-        tmp_io_vec.push_back({tmp.get_write(), tmp.size()});
-        tmp_buf_vec.emplace_back(std::move(tmp));
-    } else {
-        tmp_io_vec.push_back({b, len});
-    }
-    chunk.len += len - 4;
-    chunk.crc = last_block_crc;
-    if ((chunk.len % kBlockDataSize) > 0) {
-        size_t sector_remain = (len - 4) & kSectorSizeMask;
-        LOG_INFO("sector_remain={}", sector_remain);
-        if (sector_remain > 0) {
-            last_sector_data =
-                std::string_view(b + len - 4 - sector_remain, sector_remain);
-        }
-    }
-    return s;
-}
-
 Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
                          bool last, std::vector<TmpBuffer>& tmp_buf_vec,
                          std::vector<iovec>& tmp_io_vec,
@@ -779,17 +644,10 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
     Status<> s;
     uint64_t last_block_len = chunk.len % kBlockDataSize;
     uint32_t last_block_crc = (last_block_len == 0 ? 0 : chunk.crc);
-    uint64_t last_block_free = kBlockSize - last_block_len;
     size_t last_sector_size = last_block_len & kSectorSizeMask;
-
-    LOG_INFO(
-        "chunk len={} last_block_len={} last_sector_size={} last_block_free={} "
-        "data len={}",
-        chunk.len, last_block_len, last_sector_size, last_block_free, len);
 
     if (len <= 4 || kBlockSize - last_block_len < len ||
         (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
-        // io的数据长度不能跨block
         LOG_ERROR(
             "invalid argument data address={} data len={}, last_block_len={}",
             (uint64_t)b, len, last_block_len);
@@ -826,29 +684,38 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
         return s;
     }
 
-    uint32_t crc = 0;
+    uint32_t crc = crc32_gzip_refl(
+        last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
     if (last_sector_size != 0) {
+        uint64_t data_len = (is_fill_block ? len : len - 4);
         auto tmp_buf = dev_ptr_->Get(
-            seastar::align_up(last_sector_size + len, kSectorSize));
+            seastar::align_up(last_sector_size + data_len, kSectorSize));
         memcpy(tmp_buf.get_write(), last_sector_cached_data.data(),
                last_sector_size);
-        memcpy(tmp_buf.get_write() + last_sector_size, b, len);
-        crc = crc32_gzip_refl(
-            last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
-        net::BigEndian::PutUint32(
-            tmp_buf.get_write() + last_sector_size + len - 4, crc);
+        memcpy(tmp_buf.get_write() + last_sector_size, b, data_len);
+        if (is_fill_block) {
+            net::BigEndian::PutUint32(
+                tmp_buf.get_write() + last_sector_size + data_len - 4, crc);
+        }
         tmp_io_vec.push_back({tmp_buf.get_write(), tmp_buf.size()});
         tmp_buf_vec.emplace_back(std::move(tmp_buf));
     } else {
-        if (len & kSectorSizeMask) {
-            auto tmp_buf = dev_ptr_->Get(seastar::align_up(len, kSectorSize));
-            memcpy(tmp_buf.get_write(), b, len);
+        if (is_fill_block) {
+            tmp_io_vec.push_back({b, len});
+            net::BigEndian::PutUint32(b + len - 4, crc);  // modify data's crc
+        } else if ((len - 4) & kSectorSizeMask) {
+            uint64_t remain = (len - 4) & kSectorSizeMask;
+            if (len - 4 - remain) {
+                tmp_io_vec.push_back({b, len - 4 - remain});
+            }
+            auto tmp_buf =
+                dev_ptr_->Get(seastar::align_up(remain, kSectorSize));
+            memcpy(tmp_buf.get_write(), b + len - 4 - remain, remain);
             tmp_io_vec.push_back({tmp_buf.get_write(), tmp_buf.size()});
             tmp_buf_vec.emplace_back(std::move(tmp_buf));
         } else {
-            tmp_io_vec.push_back({b, len});
+            tmp_io_vec.push_back({b, len - 4});
         }
-        crc = net::BigEndian::Uint32(b + len - 4);
     }
     chunk.len += len - 4;
     chunk.crc = crc;
@@ -942,10 +809,8 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
             free_chunks(chunks);
             co_return s;
         }
-        LOG_INFO("chunk len={} scrc={} last_sector_cache_data size={}",
-                 chunk.len, chunk.scrc, last_sector_data.size());
         chunks.back() = chunk;  // update the last chunk
-        if (kChunkSize == ChunkPhyLen(chunk)) {
+        if (kChunkDataSize == chunk.len) {
             s = co_await dev_ptr_->Write(offset, std::move(tmp_io_vec));
             if (!s.OK()) {
                 LOG_ERROR("device-{} write data error: {}", dev_ptr_->Name(),
@@ -984,7 +849,7 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
         }
     }
 
-    // 持久化元数据
+    // save meta
     std::vector<seastar::future<Status<>>> fu_vec;
     for (int i = chunks.size() - 1; i >= 0; i--) {
         auto fu = log_ptr_->SaveChunk(chunks[i]);
