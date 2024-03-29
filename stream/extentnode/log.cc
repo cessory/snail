@@ -439,7 +439,6 @@ seastar::future<> Log::LoopRun() {
             s = co_await dev_ptr_->Write(
                 offset_, buffer.get(),
                 seastar::align_up(buffer_len, kSectorSize));
-            LOG_INFO("write log offset={} len={}", offset_, buffer_len);
         }
         if (s.OK()) {
             offset_ += seastar::align_up(buffer_len, kSectorSize);

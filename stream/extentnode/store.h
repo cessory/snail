@@ -58,10 +58,10 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
                          std::vector<iovec>& tmp_io_vec, uint64_t& offset,
                          std::string& last_sector_data);
 
-    Status<> HandleIO(ChunkEntry& chunk, int io_n, char* b, size_t len,
-                      std::vector<TmpBuffer>& tmp_buf_vec,
+    Status<> HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
+                      bool last, std::vector<TmpBuffer>& tmp_buf_vec,
                       std::vector<iovec>& tmp_io_vec,
-                      std::string& last_sector_data, int i);
+                      std::string& last_sector_data);
 
     seastar::future<Status<std::string>> GetLastSectorData(ExtentPtr ptr);
 
