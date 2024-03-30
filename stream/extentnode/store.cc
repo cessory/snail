@@ -684,8 +684,13 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
         return s;
     }
 
-    uint32_t crc = crc32_gzip_refl(
-        last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
+    uint32_t crc = 0;
+    if (last_block_crc) {
+        crc = crc32_gzip_refl(
+            last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
+    } else {
+        crc = net::BigEndian::Uint32(b + len - 4);
+    }
     if (last_sector_size != 0) {
         uint64_t data_len = (is_fill_block ? len : len - 4);
         auto tmp_buf = dev_ptr_->Get(

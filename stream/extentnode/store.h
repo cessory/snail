@@ -86,7 +86,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     seastar::future<Status<>> CreateExtent(ExtentID id);
 
     // 同时写入多个block数据, 包含crc
-    // 中间的block必须是全部填满block大小
+    // 中间的io必须是对齐sector
     // 该函数不负责crc的正确性检查
     seastar::future<Status<>> WriteBlocks(ExtentPtr extent_ptr, uint64_t offset,
                                           std::vector<iovec> iov);
