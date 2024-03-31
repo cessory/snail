@@ -87,7 +87,7 @@ struct ExtentID {
 
     inline bool Empty() const { return (hi == 0 && lo == 0); }
 
-    inline uint64_t Hash() const { return hi & lo; }
+    inline uint64_t Hash() const { return (hi << 32) & lo; }
 };
 
 struct ChunkEntry {

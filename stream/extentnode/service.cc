@@ -266,11 +266,15 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     }
 
     uint64_t origin_len = len;
-
     uint64_t origin_off = off;
 
     off = off / kBlockDataSize * kBlockDataSize;
     len = origin_len + origin_off - off;
+    uint64_t aligned_len =
+        (len + kBlockDataSize - 1) / kBlockDataSize * kBlockDataSize;
+    if (aligned_len + off <= extent_ptr->len) {
+        len = aligned_len;  // prefetch
+    }
 
     uint64_t readbytes = 0;
     uint64_t n = 0;
@@ -278,6 +282,8 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     std::vector<TmpBuffer> buffers;
     for (uint64_t i = off; i < off + len; i += n) {
         n = std::min(kChunkDataSize - i % kChunkDataSize, len - readbytes);
+        BlockCacheKey key(extent_id, i);
+        auto v = block_cache_.Get(key);
         auto st = co_await store_->ReadBlocks(extent_ptr, i, n);
         if (!st) {
             s.Set(st.Code(), st.Reason());
