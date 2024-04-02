@@ -18,13 +18,10 @@ namespace snail {
 namespace net {
 
 struct Option {
-    uint8_t version = 2;
     bool keep_alive_enable = true;
-    int keep_alive_interval = 10;           // unit: s
-    int write_timeout_s = 10;               // unit: s
-    uint16_t max_frame_size = 32768;        // 32K
-    uint32_t max_receive_buffer = 4194304;  // 4M
-    uint32_t max_stream_buffer = 1048576;   // 1M
+    int keep_alive_interval = 10;      // unit: s
+    int write_timeout_s = 10;          // unit: s
+    uint32_t max_frame_size = 131072;  // 128K
 };
 
 class BufferAllocator {
@@ -35,6 +32,8 @@ class BufferAllocator {
 
 class Session : public seastar::enable_lw_shared_from_this<Session> {
     Option opt_;
+    uint32_t max_receive_buffer_;
+    uint32_t max_stream_buffer_;
     TcpConnectionPtr conn_;
     bool client_;
     std::unique_ptr<BufferAllocator> allocator_;

@@ -12,6 +12,9 @@ namespace net {
 
 static const size_t default_accept_backlog = 1024;
 
+static constexpr uint32_t kMinStreamBufferSize = 1 << 20;
+static constexpr uint32_t kMinReceiveBufferSize = 4 << 20;
+
 class DefaultBufferAllocator : public BufferAllocator {
    public:
     virtual ~DefaultBufferAllocator() {}
@@ -24,17 +27,13 @@ class DefaultBufferAllocator : public BufferAllocator {
     }
 };
 
-static bool IsValidOpt(const Option &opt) {
-    if (opt.version != 2) {
-        return false;
-    }
-
-    return true;
-}
-
 Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
                  std::unique_ptr<BufferAllocator> allocator)
     : opt_(opt),
+      max_receive_buffer_(
+          std::max(32 * opt.max_frame_size, kMinReceiveBufferSize)),
+      max_stream_buffer_(
+          std::max(8 * opt.max_frame_size, kMinStreamBufferSize)),
       conn_(std::move(conn)),
       client_(client),
       allocator_(allocator ? allocator.release()
@@ -43,7 +42,11 @@ Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
       next_id_((client ? 1 : 0)),
       die_(false),
       accept_sem_(default_accept_backlog),
-      tokens_(opt.max_receive_buffer) {}
+      tokens_(max_receive_buffer_) {
+    if (opt.max_frame_size > kMaxFrameSize) {
+        throw std::runtime_error("invalid max frame size");
+    }
+}
 
 SessionPtr Session::make_session(const Option &opt, TcpConnectionPtr conn,
                                  bool client,
@@ -83,24 +86,21 @@ seastar::future<> Session::RecvLoop() {
             SetStatus(static_cast<ErrCode>(ECONNABORTED));
             break;
         }
-        uint8_t ver = hdr[0];
-        CmdType cmd = static_cast<CmdType>(hdr[1]);
-        uint16_t len = LittleEndian::Uint16(&hdr[2]);
-        uint32_t sid = LittleEndian::Uint32(&hdr[4]);
-        if (ver != 1 && ver != 2) {
+        Frame f;
+        uint32_t len = f.Unmarshal(hdr);
+        if (f.ver != 2) {
             SetStatus(static_cast<ErrCode>(ECONNABORTED));
             break;
         }
-        switch (cmd) {
+        switch (f.cmd) {
             case CmdType::NOP:
                 break;
             case CmdType::SYN: {
-                auto it = streams_.find(sid);
+                auto it = streams_.find(f.sid);
                 if (it == streams_.end()) {
                     StreamPtr stream = Stream::make_stream(
-                        sid, ver, (uint32_t)opt_.max_frame_size,
-                        shared_from_this());
-                    streams_[sid] = stream;
+                        f.sid, f.ver, opt_.max_frame_size, shared_from_this());
+                    streams_[f.sid] = stream;
                     try {
                         co_await accept_sem_.wait();
                     } catch (std::exception &e) {
@@ -112,7 +112,7 @@ seastar::future<> Session::RecvLoop() {
                 break;
             }
             case CmdType::FIN: {
-                auto it = streams_.find(sid);
+                auto it = streams_.find(f.sid);
                 if (it != streams_.end()) {
                     auto stream = it->second;
                     stream->Fin();
@@ -132,7 +132,7 @@ seastar::future<> Session::RecvLoop() {
                         SetStatus(static_cast<ErrCode>(ECONNABORTED));
                         co_return;
                     }
-                    auto it = streams_.find(sid);
+                    auto it = streams_.find(f.sid);
                     if (it != streams_.end()) {
                         auto stream = it->second;
                         stream->PushData(std::move(buf));
@@ -155,7 +155,7 @@ seastar::future<> Session::RecvLoop() {
                         SetStatus(static_cast<ErrCode>(ECONNABORTED));
                         co_return;
                     }
-                    auto it = streams_.find(sid);
+                    auto it = streams_.find(f.sid);
                     if (it != streams_.end()) {
                         auto stream = it->second;
                         uint32_t consumed = LittleEndian::Uint32(buf);
@@ -218,11 +218,7 @@ seastar::future<> Session::SendLoop() {
                 write_q_[i].pop();
                 sent_q.emplace(req);
                 seastar::temporary_buffer<char> hdr(STREAM_HEADER_SIZE);
-                *hdr.get_write() = req->frame.ver;
-                *(hdr.get_write() + 1) = req->frame.cmd;
-                LittleEndian::PutUint16(hdr.get_write() + 2,
-                                        (uint16_t)(req->frame.packet.len()));
-                LittleEndian::PutUint32(hdr.get_write() + 4, req->frame.sid);
+                req->frame.MarshalTo(hdr.get_write());
                 packet.append(std::move(hdr));
                 if (req->frame.packet.nr_frags() > 0) {
                     packet.append(std::move(req->frame.packet));
@@ -309,7 +305,7 @@ void Session::WritePing() {
 
     write_request *req = new write_request();
     req->classid = ClassID::CTRL;
-    req->frame.ver = opt_.version;
+    req->frame.ver = 2;
     req->frame.cmd = CmdType::NOP;
     req->frame.sid = 0;
 
@@ -331,10 +327,10 @@ seastar::future<Status<StreamPtr>> Session::OpenStream() {
     }
     next_id_ = id;
 
-    auto stream = Stream::make_stream(
-        id, opt_.version, (uint32_t)opt_.max_frame_size, shared_from_this());
+    auto stream =
+        Stream::make_stream(id, 2, opt_.max_frame_size, shared_from_this());
     Frame frame;
-    frame.ver = opt_.version;
+    frame.ver = 2;
     frame.cmd = CmdType::SYN;
     frame.sid = id;
     auto st = co_await WriteFrameInternal(std::move(frame), ClassID::CTRL);

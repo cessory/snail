@@ -10,12 +10,12 @@ namespace net {
 
 static constexpr uint32_t kInitialWnd = 262144;
 
-Stream::Stream(uint32_t id, uint8_t ver, uint16_t frame_size, SessionPtr sess)
+Stream::Stream(uint32_t id, uint8_t ver, uint32_t frame_size, SessionPtr sess)
     : id_(id), ver_(ver), frame_size_(frame_size), sess_(sess) {
-    remote_wnd_ = kInitialWnd;
+    remote_wnd_ = std::max(kInitialWnd, frame_size_ * 8);
 }
 
-StreamPtr Stream::make_stream(uint32_t id, uint8_t ver, uint16_t frame_size,
+StreamPtr Stream::make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
                               SessionPtr sess) {
     StreamPtr stream =
         seastar::make_lw_shared<Stream>(id, ver, frame_size, sess);
@@ -33,17 +33,14 @@ seastar::future<Status<seastar::temporary_buffer<char>>> Stream::ReadFrame(
             sess_->ReturnTokens(n);
             s.SetValue(std::move(b));
             buffers_.pop();
-            if (ver_ == 2) {
-                recv_bytes_ += n;
-                incr_ += n;
-                if (incr_ >= sess_->opt_.max_stream_buffer / 2 ||
-                    recv_bytes_ == n) {
-                    incr_ = 0;
-                    auto st = co_await SendWindowUpdate(recv_bytes_);
-                    if (!st.OK()) {
-                        s.Set(st.Code(), st.Reason());
-                        co_return s;
-                    }
+            recv_bytes_ += n;
+            incr_ += n;
+            if (incr_ >= sess_->max_stream_buffer_ / 2 || recv_bytes_ == n) {
+                incr_ = 0;
+                auto st = co_await SendWindowUpdate(recv_bytes_);
+                if (!st.OK()) {
+                    s.Set(st.Code(), st.Reason());
+                    co_return s;
                 }
             }
             break;
@@ -118,8 +115,7 @@ seastar::future<Status<>> Stream::SendWindowUpdate(uint32_t consumed) {
     f.sid = id_;
     auto data = seastar::temporary_buffer<char>(8);
     LittleEndian::PutUint32(data.get_write(), consumed);
-    LittleEndian::PutUint32(data.get_write() + 4,
-                            sess_->opt_.max_stream_buffer);
+    LittleEndian::PutUint32(data.get_write() + 4, sess_->max_stream_buffer_);
     f.packet = std::move(seastar::net::packet(std::move(data)));
     return sess_->WriteFrameInternal(std::move(f), Session::ClassID::DATA);
 }
@@ -150,18 +146,16 @@ seastar::future<Status<>> Stream::WriteFrame(std::vector<iovec> iov) {
         co_return s;
     }
 
-    if (ver_ == 2) {
-        int32_t inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
-        int32_t win = static_cast<int32_t>(remote_wnd_) - inflight;
-        while (inflight < 0 || win <= 0) {
-            co_await wnd_cv_.wait();
-            if (die_ || has_fin_) {
-                s.Set(EPIPE);
-                co_return s;
-            }
-            inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
-            win = static_cast<int32_t>(remote_wnd_) - inflight;
+    int32_t inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
+    int32_t win = static_cast<int32_t>(remote_wnd_) - inflight;
+    while (inflight < 0 || win <= 0) {
+        co_await wnd_cv_.wait();
+        if (die_ || has_fin_) {
+            s.Set(EPIPE);
+            co_return s;
         }
+        inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
+        win = static_cast<int32_t>(remote_wnd_) - inflight;
     }
     sent_bytes_ += packet.len();
     Frame frame;

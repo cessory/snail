@@ -24,7 +24,7 @@ using StreamPtr = seastar::lw_shared_ptr<Stream>;
 class Stream {
     uint32_t id_;
     uint8_t ver_;
-    uint16_t frame_size_;
+    uint32_t frame_size_;
     SessionPtr sess_;
     std::queue<seastar::temporary_buffer<char>> buffers_;
     size_t buffer_size_ = 0;
@@ -57,12 +57,12 @@ class Stream {
     void Update(uint32_t consumed, uint32_t window);
 
    public:
-    explicit Stream(uint32_t id, uint8_t ver, uint16_t frame_size,
+    explicit Stream(uint32_t id, uint8_t ver, uint32_t frame_size,
                     SessionPtr sess);
 
     ~Stream() { sess_.release(); }
 
-    static StreamPtr make_stream(uint32_t id, uint8_t ver, uint16_t frame_size,
+    static StreamPtr make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
                                  SessionPtr sess);
 
     uint32_t ID() const { return id_; }
