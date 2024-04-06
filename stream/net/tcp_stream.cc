@@ -173,6 +173,24 @@ seastar::future<Status<>> Stream::WriteFrame(const char *b, size_t n) {
     return WriteFrame({iov});
 }
 
+seastar::future<Status<>> Stream::WriteFrame(
+    seastar::temporary_buffer<char> b) {
+    iovec iov = {(void *)b.get_write(), b.size()};
+    auto s = co_await WriteFrame({iov});
+    co_return s;
+}
+
+seastar::future<Status<>> Stream::WriteFrame(
+    std::vector<seastar::temporary_buffer<char>> buffers) {
+    std::vector<iovec> iov;
+    int n = buffers.size();
+    for (int i = 0; i < n; i++) {
+        iov.push_back({(void *)buffers[i].get_write(), buffers[i].size()});
+    }
+    auto s = co_await WriteFrame(std::move(iov));
+    co_return s;
+}
+
 void Stream::Update(uint32_t consumed, uint32_t window) {
     remote_consumed_ = consumed;
     remote_wnd_ = window;

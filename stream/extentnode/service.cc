@@ -24,7 +24,8 @@ static seastar::future<Status<>> SendResp(
         0, reinterpret_cast<const unsigned char *>(buf.get() + 4),
         n + kMetaMsgHeaderLen - 4);
     net::BigEndian::PutUint32(buf.get_write(), crc);
-    return stream->WriteFrame(buf.get(), buf.size());
+    auto s = co_await stream->WriteFrame(buf.get(), buf.size());
+    co_return s;
 }
 
 static seastar::future<Status<>> SendCommonResp(
@@ -93,14 +94,18 @@ static seastar::future<Status<>> SendCommonResp(net::StreamPtr stream,
                                                 ExtentnodeMsgType msgType,
                                                 ErrCode err,
                                                 std::string reason) {
-    return SendCommonResp(stream, reqid, msgType, err, std::move(reason),
-                          std::map<std::string, std::string>());
+    auto s =
+        co_await SendCommonResp(stream, reqid, msgType, err, std::move(reason),
+                                std::map<std::string, std::string>());
+    co_return s;
 }
 
 static seastar::future<Status<>> SendCommonResp(
     net::StreamPtr stream, std::string_view reqid, ExtentnodeMsgType msgType,
     ErrCode err, std::map<std::string, std::string> headers) {
-    return SendCommonResp(stream, reqid, msgType, err, "", std::move(headers));
+    auto s = co_await SendCommonResp(stream, reqid, msgType, err, "",
+                                     std::move(headers));
+    co_return s;
 }
 
 static seastar::future<Status<>> SendReadExtentResp(net::StreamPtr stream,
@@ -110,7 +115,8 @@ static seastar::future<Status<>> SendReadExtentResp(net::StreamPtr stream,
     resp->mutable_base()->set_reqid(std::string(reqid.data(), reqid.size()));
     resp->mutable_base()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
-    return SendResp(resp.get(), READ_EXTENT_RESP, stream);
+    auto s = co_await SendResp(resp.get(), READ_EXTENT_RESP, stream);
+    co_return s;
 }
 
 static seastar::future<Status<>> SendGetExtentResp(net::StreamPtr stream,
@@ -122,7 +128,8 @@ static seastar::future<Status<>> SendGetExtentResp(net::StreamPtr stream,
     resp->mutable_base()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
     resp->set_ctime(ctime);
-    return SendResp(resp.get(), READ_EXTENT_RESP, stream);
+    auto s = co_await SendResp(resp.get(), READ_EXTENT_RESP, stream);
+    co_return s;
 }
 
 seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
@@ -163,8 +170,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     auto defer = seastar::defer([extent_ptr] { extent_ptr->mu.unlock(); });
 
     std::vector<TmpBuffer> buffers;
-    std::vector<TmpBuffer> sent_buffers;
-    std::vector<iovec> iov;
     std::optional<seastar::future<Status<>>> fu;
     uint64_t sent = 0;
     uint64_t ready = 0;
@@ -176,12 +181,31 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             co_return s;
         }
         auto b = std::move(st.Value());
-        if (b.size() <= 4 || b.size() > len) {
+        if (b.size() <= 4) {
             s.Set(EBADMSG);
             co_return s;
         }
-        len -= b.size() - 4;
-        if (iov.size() == 4) {
+        size_t data_len = 0;
+        for (const char *p = b.get(); p < b.end(); p += kBlockSize) {
+            size_t n = std::min(kBlockSize, (size_t)(b.end() - p));
+            if (n < = 4) {
+                s.Set(EBADMSG);
+                co_return s;
+            }
+            data_len += n - 4;
+            uint32_t crc = crc32_gzip_refl(0, (const unsigned char *)p, n - 4);
+            uint32_t origin_crc = net::BigEndian::Uint32(p + n - 4);
+            if (crc != origin_crc) {
+                s.Set(ErrCode::ErrInvalidChecksum);
+                co_return s;
+            }
+        }
+        if (len < data_len) {
+            s.Set(EBADMSG);
+            co_return s;
+        }
+        len -= data_len;
+        if (buffer.size() == 4) {
             if (fu) {
                 s = co_await std::move(fu.value());
                 if (!s) {
@@ -193,13 +217,11 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
                 sent = 0;
                 fu.reset();
             }
-            fu = store_->WriteBlocks(extent_ptr, off, std::move(iov));
-            sent_buffers = std::move(buffers);
+            fu = store_->Write(extent_ptr, off, std::move(buffers));
             sent = ready;
             ready = 0;
         }
-        ready += b.size() - 4;
-        iov.push_back({b.get_write(), b.size()});
+        ready += data_len;
         buffers.emplace_back(std::move(b));
     }
 
@@ -211,12 +233,33 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             co_return s;
         }
         fu.reset();
+        off += sent;
     }
 
-    if (iov.size() > 0) {
-        s = co_await store_->WriteBlocks(extent_ptr, off, std::move(iov));
+    if (buffers.size() > 0) {
+        s = co_await store_->Write(extent_ptr, off, std::move(buffers));
     }
     s = co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
+    co_return s;
+}
+
+static seastar::future<Status<>> WriteFrames(net::StreamPtr stream,
+                                             std::vector<TmpBuffer> buffers) {
+    Status<> s;
+    int n = buffers.size();
+    std::vector<seastar::future<Status<>>> fu_vec;
+    for (int i = 0; i < n; ++i) {
+        auto f = stream->WriteFrame(std::move(buffers[i]));
+        fu_vec.emplace_back(std::move(f));
+    }
+
+    auto res = co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
+    for (int i = 0; i < n; ++i) {
+        if (!res[i]) {
+            s = std::move(res[i]);
+            break;
+        }
+    }
     co_return s;
 }
 
@@ -275,16 +318,46 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     if (aligned_len + off <= extent_ptr->len) {
         len = aligned_len;  // prefetch
     }
+    size_t max_frame_size =
+        stream->MaxFrameSize() / kBlockSize * kBlockDataSize;
 
-    uint64_t readbytes = 0;
-    uint64_t n = 0;
+    bool first = false;
     std::optional<seastar::future<Status<>>> fu;
     std::vector<TmpBuffer> buffers;
-    for (uint64_t i = off; i < off + len; i += n) {
-        n = std::min(kChunkDataSize - i % kChunkDataSize, len - readbytes);
-        BlockCacheKey key(extent_id, i);
-        auto v = block_cache_.Get(key);
-        auto st = co_await store_->ReadBlocks(extent_ptr, i, n);
+    uint64_t offset = off;
+    while (len > 0) {
+        size_t n = std::min(max_frame_size, len);
+        len -= n;
+        size_t tmp_n = n;
+        size_t extent_off = offset;
+        size_t need_to_read = 0;
+        while (tmp_n > 0) {
+            size_t tmp_len = std::min(tmp_n, kBlockDataSize);
+            tmp_n -= tmp_len;
+            BlockCacheKey key(extent_id, offset);
+            auto v = block_cache_.Get(key);
+            if (!v.has_value()) {
+                need_to_read += tmp_len;
+                continue;
+            }
+
+            if (fu) {
+                s = co_await std::move(fu.value());
+                if (!s) {
+                    co_return s;
+                }
+                fu.reset();
+            }
+
+            auto st = co_await store_->Read(extent_ptr, extent_off, tmp_len);
+            if (!st) {
+                s.Set(st.Code(), st.Reason());
+                co_return s;  // return error, then close stream
+            }
+            fu = WriteFrames(std::move(st.Value()));
+        }
+
+        auto st = co_await store_->Read(extent_ptr, i, n);
         if (!st) {
             s.Set(st.Code(), st.Reason());
             co_return s;  // return error, then close stream

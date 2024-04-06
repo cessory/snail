@@ -54,7 +54,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     seastar::future<Status<>> AllocChunk(ExtentPtr extent_ptr);
 
     Status<> HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
-                      bool last, std::vector<TmpBuffer>& tmp_buf_vec,
+                      std::vector<TmpBuffer>& tmp_buf_vec,
                       std::vector<iovec>& tmp_io_vec,
                       std::string& last_sector_data);
 
@@ -86,24 +86,23 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     seastar::future<Status<>> CreateExtent(ExtentID id);
 
     // 同时写入多个block数据, 包含crc
+    // 如果有多个io, 第一个io的数据必须填充到sector对齐
     // 中间的io必须是对齐sector
     // 该函数不负责crc的正确性检查
-    seastar::future<Status<>> WriteBlocks(ExtentPtr extent_ptr, uint64_t offset,
-                                          std::vector<iovec> iov);
+    seastar::future<Status<>> Write(ExtentPtr extent_ptr, uint64_t offset,
+                                    std::vector<iovec> iov);
 
-    // 读取一个block的数据
-    // off - 必须block对齐(32k -4)
-    // 返回一个block的物理数据, 包含crc
-    seastar::future<Status<seastar::temporary_buffer<char>>> ReadBlock(
-        ExtentPtr extent_ptr, uint64_t off);
+    seastar::future<Status<>> Write(ExtentPtr extent_ptr, uint64_t offset,
+                                    std::vector<TmpBuffer> buffers);
 
     // 读取多个block的数据
     // off - 必须block对齐(32k -4)
     // len   - 数据长度, off+len不能超过extent的数据长度,
     // 需要上层根据extent的实际长度计算好.
-    // 返回的最后一个块的数据可能不足32k
-    seastar::future<Status<std::vector<TmpBuffer>>> ReadBlocks(
-        ExtentPtr extent_ptr, uint64_t off, size_t len);
+    // 如果len大于chunk的大小, 会返回多个数据块
+    seastar::future<Status<std::vector<TmpBuffer>>> Read(ExtentPtr extent_ptr,
+                                                         uint64_t off,
+                                                         size_t len);
 
     seastar::future<Status<>> RemoveExtent(ExtentID id);
 

@@ -39,7 +39,7 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
         0, reinterpret_cast<const unsigned char *>(buf.get()), 496);
     net::BigEndian::PutUint32(buf.get_write() + 496, crc);
     iov.push_back({buf.get_write(), 500});
-    s = store->WriteBlocks(extent_ptr, off, std::move(iov)).get0();
+    s = store->Write(extent_ptr, off, std::move(iov)).get0();
     BOOST_REQUIRE(s.OK());
 
     BOOST_REQUIRE_EQUAL(extent_ptr->len, 496);
@@ -66,7 +66,7 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
         iov.push_back({buf.get_write(), buf.size()});
         buf_vec.emplace_back(std::move(buf));
     }
-    s = store->WriteBlocks(extent_ptr, off, std::move(iov)).get0();
+    s = store->Write(extent_ptr, off, std::move(iov)).get0();
     BOOST_REQUIRE(s.OK());
     buf_vec.clear();
     BOOST_REQUIRE_EQUAL(extent_ptr->len, 4226556);
@@ -77,26 +77,48 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
                           32561);
     net::BigEndian::PutUint32(buf.get_write() + 32561, crc);
     iov.push_back({buf.get_write(), buf.size()});
-    s = store->WriteBlocks(extent_ptr, off, std::move(iov)).get0();
+    s = store->Write(extent_ptr, off, std::move(iov)).get0();
     BOOST_REQUIRE(s.OK());
     buf_vec.clear();
     BOOST_REQUIRE_EQUAL(extent_ptr->len, 4259117);
 
     for (uint64_t off = 0; off < extent_ptr->len; off += kBlockDataSize) {
-        auto st = store->ReadBlock(extent_ptr, off).get0();
+        size_t n = kBlockDataSize;
+        if (off + kBlockDataSize > extent_ptr->len) {
+            n = extent_ptr->len - off;
+        }
+        auto st = store->Read(extent_ptr, off, n).get0();
         if (!st.OK()) {
             LOG_ERROR("read block off={} error: {}", off, st.String());
         }
         BOOST_REQUIRE(st.OK());
+        std::vector<TmpBuffer> res = std::move(st.Value());
+        BOOST_REQUIRE_EQUAL(res.size(), 1);
+        uint32_t crc = crc32_gzip_refl(
+            0, reinterpret_cast<const unsigned char *>(res[0].get()), n);
+        uint32_t origin_crc = net::BigEndian::Uint32(res[0].get() + n);
+        BOOST_REQUIRE_EQUAL(crc, origin_crc);
     }
 
     size_t read_bytes = 0;
-    auto st = store->ReadBlocks(extent_ptr, 0, 4225251).get0();
+    size_t read_len = 4225251;
+    auto st = store->Read(extent_ptr, 0, read_len).get0();
     auto datas = std::move(st.Value());
     for (int i = 0; i < datas.size(); i++) {
-        read_bytes += datas[i].size() - 4;
+        size_t data_len = datas[i].size();
+        const char *p = datas[i].get();
+        while (data_len > 0) {
+            size_t n = std::min(kBlockSize, data_len);
+            uint32_t crc = crc32_gzip_refl(
+                0, reinterpret_cast<const unsigned char *>(p), n - 4);
+            uint32_t origin_crc = net::BigEndian::Uint32(p + n - 4);
+            BOOST_REQUIRE_EQUAL(crc, origin_crc);
+            data_len -= n;
+            p += n;
+            read_bytes += n - 4;
+        }
     }
-    BOOST_REQUIRE_EQUAL(read_bytes, 4225251);
+    BOOST_REQUIRE_EQUAL(read_bytes, read_len);
 
     store->Close().get();
 }
@@ -194,12 +216,16 @@ SEASTAR_THREAD_TEST_CASE(small_write_test) {
                 iov.push_back({p, 200 + 4});
             }
         }
-        s = store->WriteBlocks(extent_ptr, offset, std::move(iov)).get0();
+        s = store->Write(extent_ptr, offset, std::move(iov)).get0();
         BOOST_REQUIRE(s.OK());
         offset += 200;
         buffers.clear();
     }
     BOOST_REQUIRE_EQUAL(extent_ptr->len, n * 200);
+
+    auto st = store->Read(extent_ptr, 0, n * 200).get0();
+    BOOST_REQUIRE(st);
+    store->Close().get();
 }
 
 SEASTAR_THREAD_TEST_CASE(large_write_test) {
@@ -229,19 +255,22 @@ SEASTAR_THREAD_TEST_CASE(large_write_test) {
         net::BigEndian::PutUint32(buf.get_write() + kBlockDataSize, crc);
         std::vector<iovec> iov;
         iov.push_back({buf.get_write(), buf.size()});
-        s = store->WriteBlocks(extent_ptr, offset, std::move(iov)).get0();
+        s = store->Write(extent_ptr, offset, std::move(iov)).get0();
         BOOST_REQUIRE(s.OK());
         offset += kBlockDataSize;
     }
     BOOST_REQUIRE_EQUAL(extent_ptr->len, n * kBlockDataSize);
 
-    auto st = store->ReadBlock(extent_ptr, kBlockDataSize * 3).get0();
+    auto st =
+        store->Read(extent_ptr, kBlockDataSize * 3, kBlockDataSize).get0();
     BOOST_REQUIRE(st);
-    BOOST_REQUIRE_EQUAL(st.Value().size(), kBlockSize);
+    auto result = std::move(st.Value());
+    BOOST_REQUIRE_EQUAL(result.size(), 1);
+    BOOST_REQUIRE_EQUAL(result[0].size(), kBlockSize);
     uint32_t origin_crc =
-        net::BigEndian::Uint32(st.Value().get() + kBlockDataSize);
+        net::BigEndian::Uint32(result[0].get() + kBlockDataSize);
     uint32_t crc = crc32_gzip_refl(
-        0, reinterpret_cast<const unsigned char *>(st.Value().get()),
+        0, reinterpret_cast<const unsigned char *>(result[0].get()),
         kBlockDataSize);
     BOOST_REQUIRE_EQUAL(origin_crc, crc);
 }

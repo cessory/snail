@@ -638,25 +638,32 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
 }
 
 Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
-                         bool last, std::vector<TmpBuffer>& tmp_buf_vec,
+                         std::vector<TmpBuffer>& tmp_buf_vec,
                          std::vector<iovec>& tmp_io_vec,
                          std::string& last_sector_cached_data) {
     Status<> s;
     uint64_t last_block_len = chunk.len % kBlockDataSize;
     uint32_t last_block_crc = (last_block_len == 0 ? 0 : chunk.crc);
     size_t last_sector_size = last_block_len & kSectorSizeMask;
+    uint64_t phy_len = chunk.len / kBlockDataSize * kBlockSize + last_block_len;
+    uint64_t last_block_free_size = kBlockSize - last_block_len;
 
-    if (len <= 4 || kBlockSize - last_block_len < len ||
-        (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
+    if (len <= 4 || (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask) ||
+        phy_len + len > kChunkSize) {
         LOG_ERROR(
-            "invalid argument data address={} data len={}, last_block_len={}",
-            (uint64_t)b, len, last_block_len);
+            "data len={} too small or too large or data address is not aligned",
+            len);
         s.Set(EINVAL);
         return s;
     }
 
-    // is_fill_block indicates whether the current data fills the entire block
-    bool is_fill_block = ((chunk.len + len - 4) % kBlockDataSize == 0);
+    if (len > last_block_free_size &&
+        ((len - last_block_free_size) & kBlockSizeMask) <= 4) {
+        LOG_ERROR("data len={} invalid last_block_free_size={}", len,
+                  last_block_free_size);
+        s.Set(EINVAL);
+        return s;
+    }
 
     if (last_sector_size != last_sector_cached_data.size()) {
         LOG_ERROR("last_sector_size={} is not match with cached data size={}",
@@ -667,47 +674,62 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
     }
 
     if (!first && last_sector_size != 0) {
-        LOG_ERROR(
-            "last_sector_size={} is not zero, because this is not a first io",
-            last_sector_size);
+        LOG_ERROR("last_sector_size={} is not zero, but this is not a first io",
+                  last_sector_size);
         s.Set(ErrCode::ErrUnExpect,
               "last sector size is not match with cached data size");
         return s;
     }
 
-    if (!first && !last &&
-        ((is_fill_block ? len : len - 4) & kSectorSizeMask)) {
-        LOG_ERROR(
-            "this is a middle io, but it's len({}) is not aligned block size",
-            len);
-        s.Set(EINVAL);
-        return s;
-    }
+    uint64_t data_len =
+        (len <= last_block_free_size)
+            ? len - 4
+            : (last_block_free_size - 4 +
+               (len - last_block_free_size) / kBlockSize * kBlockDataSize +
+               ((len - last_block_free_size) & kBlockSizeMask) - 4);
+
+    // is_fill_block indicates whether the current data fills the
+    // entire block
+    bool is_fill_block = (((phy_len + len) & kBlockSizeMask) == 0);
 
     uint32_t crc = 0;
     if (last_block_crc) {
-        crc = crc32_gzip_refl(
-            last_block_crc, reinterpret_cast<const unsigned char*>(b), len - 4);
+        if (len > last_block_free_size) {
+            crc = net::BigEndian::Uint32(b + len - 4);
+        } else {
+            crc = crc32_gzip_refl(last_block_crc,
+                                  reinterpret_cast<const unsigned char*>(b),
+                                  len - 4);
+        }
     } else {
         crc = net::BigEndian::Uint32(b + len - 4);
     }
-    if (last_sector_size != 0) {
-        uint64_t data_len = (is_fill_block ? len : len - 4);
+    if (last_sector_size) {
+        if (len >= last_block_free_size) {
+            uint32_t first_block_crc = crc32_gzip_refl(
+                last_block_crc, reinterpret_cast<const unsigned char*>(b),
+                last_block_free_size - 4);
+            net::BigEndian::PutUint32(b + last_block_free_size - 4,
+                                      first_block_crc);
+        }
+        uint64_t valid_len = is_fill_block ? len : len - 4;
         auto tmp_buf = dev_ptr_->Get(
-            seastar::align_up(last_sector_size + data_len, kSectorSize));
+            seastar::align_up(last_sector_size + valid_len, kSectorSize));
         memcpy(tmp_buf.get_write(), last_sector_cached_data.data(),
                last_sector_size);
-        memcpy(tmp_buf.get_write() + last_sector_size, b, data_len);
-        if (is_fill_block) {
-            net::BigEndian::PutUint32(
-                tmp_buf.get_write() + last_sector_size + data_len - 4, crc);
-        }
+        memcpy(tmp_buf.get_write() + last_sector_size, b, valid_len);
         tmp_io_vec.push_back({tmp_buf.get_write(), tmp_buf.size()});
         tmp_buf_vec.emplace_back(std::move(tmp_buf));
     } else {
+        if (last_block_crc && len >= last_block_free_size) {
+            uint32_t first_block_crc = crc32_gzip_refl(
+                last_block_crc, reinterpret_cast<const unsigned char*>(b),
+                last_block_free_size - 4);
+            net::BigEndian::PutUint32(b + last_block_free_size - 4,
+                                      first_block_crc);
+        }
         if (is_fill_block) {
             tmp_io_vec.push_back({b, len});
-            net::BigEndian::PutUint32(b + len - 4, crc);  // modify data's crc
         } else if ((len - 4) & kSectorSizeMask) {
             uint64_t remain = (len - 4) & kSectorSizeMask;
             if (len - 4 - remain) {
@@ -722,7 +744,8 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
             tmp_io_vec.push_back({b, len - 4});
         }
     }
-    chunk.len += len - 4;
+
+    chunk.len += data_len;
     chunk.crc = crc;
     chunk.scrc = 0;
     if (!is_fill_block) {
@@ -754,9 +777,8 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
 }
 
 // iovec include crc
-seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
-                                             uint64_t offset,
-                                             std::vector<iovec> iov) {
+seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
+                                       std::vector<iovec> iov) {
     Status<> s;
     if (offset != extent_ptr->len) {
         LOG_ERROR("extent({}-{}) is over write, offset={} len={}",
@@ -807,7 +829,7 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     int n = iov.size();
     for (int i = 0; i < n; i++) {
         s = HandleIO(chunk, (char*)iov[i].iov_base, iov[i].iov_len, (i == 0),
-                     (i == n - 1), tmp_buf_vec, tmp_io_vec, last_sector_data);
+                     tmp_buf_vec, tmp_io_vec, last_sector_data);
         if (!s.OK()) {
             LOG_ERROR("device-{} handle {}th io error: {}", dev_ptr_->Name(), i,
                       s.String());
@@ -888,12 +910,26 @@ seastar::future<Status<>> Store::WriteBlocks(ExtentPtr extent_ptr,
     co_return s;
 }
 
-seastar::future<Status<std::vector<TmpBuffer>>> Store::ReadBlocks(
+seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
+                                       std::vector<TmpBuffer> buffers) {
+    std::vector<iovec> iov;
+    int n = buffers.size();
+
+    for (int i = 0; i < n; ++i) {
+        iov.push_back({buffers[i].get_write(), buffers[i].size()});
+    }
+
+    auto s = co_await Write(extent_ptr, offset, std::move(iov));
+    co_return s;
+}
+
+seastar::future<Status<std::vector<TmpBuffer>>> Store::Read(
     ExtentPtr extent_ptr, uint64_t off, size_t len) {
     Status<std::vector<TmpBuffer>> s;
     std::vector<TmpBuffer> result;
 
     if (off % kBlockDataSize) {
+        LOG_ERROR("invalid arguments off={} is not align kBlockDataSize", off);
         s.Set(EINVAL);
         co_return s;
     }
@@ -902,146 +938,97 @@ seastar::future<Status<std::vector<TmpBuffer>>> Store::ReadBlocks(
     }
 
     if (off + len > extent_ptr->len) {
+        LOG_ERROR("len={} is out of range off={}, extent={}-{} extent len={}",
+                  len, off, extent_ptr->id.hi, extent_ptr->id.lo,
+                  extent_ptr->len);
         s.Set(ERANGE);
         co_return s;
     }
 
-    size_t last_block_len = len % kBlockDataSize;  // 最后一个block的数据长度
-
-    uint32_t blocks =
-        (len + kBlockDataSize - 1) / kBlockDataSize;  // total block number
-    auto chunks = extent_ptr->chunks;
-    int chunk_idx = off / kChunkDataSize;
-    auto chunk = chunks[chunk_idx];
+    uint64_t last_block_len = len % kBlockDataSize;
+    auto chunks = extent_ptr->chunks;  // copy chunk meta
     size_t chunk_off = off % kChunkDataSize;
 
-    for (int i = chunk_idx; i < chunks.size() && blocks > 0; i++) {
+    for (int i = off / kChunkDataSize; i < chunks.size() && len > 0; ++i) {
         size_t chunk_len = chunks[i].len - chunk_off;
-        //该chunk的block个数
-        uint32_t block_n = (chunk_len + kBlockDataSize - 1) / kBlockDataSize;
-        block_n = std::min(block_n, blocks);
-        size_t real_off = chunk_off / kBlockDataSize * kBlockSize +
-                          chunk_off % kBlockDataSize;
-        uint64_t phy_off =
-            super_block_.DataOffset() + chunks[i].index * kChunkSize + real_off;
+        uint64_t n = std::min(chunk_len, len);
+        len -= n;
 
-        //物理空间长度
-        chunk_len = chunk_len / kBlockDataSize * kBlockSize +
-                    chunk_len % kBlockDataSize;
-        size_t buffer_len = std::min(block_n * kBlockSize, chunk_len);
-        size_t need_read_bytes = seastar::align_up(buffer_len, kSectorSize);
-        if (buffer_len & kBlockSizeMask) {
-            buffer_len += 4;  //最后一个数据块的crc
+        // align up block data size
+        n = (n + kBlockDataSize - 1) / kBlockDataSize * kBlockDataSize;
+        if (n > chunk_len) {
+            // read all chunk data
+            n = chunk_len;
         }
+        size_t phy_chunk_off = chunk_off / kBlockDataSize * kBlockSize +
+                               chunk_off % kBlockDataSize;
+        uint64_t phy_disk_off = super_block_.DataOffset() +
+                                chunks[i].index * kChunkSize + phy_chunk_off;
+
+        size_t buffer_len =
+            n / kBlockDataSize * kBlockSize + n % kBlockDataSize;
+        if (n % kBlockDataSize != 0) {
+            buffer_len += 4;  // to save crc
+        }
+        size_t need_read_bytes = seastar::align_up(buffer_len, kSectorSize);
         auto buf = dev_ptr_->Get(need_read_bytes);
 
-        auto st =
-            co_await dev_ptr_->Read(phy_off, buf.get_write(), need_read_bytes);
-        if (!st.OK()) {
+        auto st = co_await dev_ptr_->Read(phy_disk_off, buf.get_write(),
+                                          need_read_bytes);
+        if (!st) {
+            LOG_ERROR(
+                "read extent error: {}, extent={}-{} off={} chunk index={}",
+                st.String(), extent_ptr->id.hi, extent_ptr->id.lo, off, i);
             s.Set(st.Code(), st.Reason());
-            break;
+            co_return s;
         }
-        blocks -= block_n;
         chunk_off = 0;
         if (st.Value() != need_read_bytes) {
+            LOG_ERROR(
+                "read extent error: unexpect bytes, extent={}-{} off={} chunk "
+                "index={}",
+                extent_ptr->id.hi, extent_ptr->id.lo, off, i);
             s.Set(ErrCode::ErrUnExpect, "read unexcept bytes");
-            break;
+            co_return s;
         }
+        buf.trim(buffer_len);
 
         // check crc
         char* p = buf.get_write();
-        for (uint32_t j = 0; j < block_n; j++, p += kBlockSize) {
-            size_t data_len = std::min(kBlockSize, buffer_len);
+        for (char* p = buf.get_write(); p < buf.end(); p += kBlockSize) {
+            size_t data_len = std::min(kBlockSize, (size_t)(buf.end() - p));
             uint32_t crc = crc32_gzip_refl(
                 0, reinterpret_cast<const unsigned char*>(p), data_len - 4);
             if (data_len != kBlockSize) {
                 net::BigEndian::PutUint32(p + data_len - 4, chunks[i].crc);
             }
-            buffer_len -= data_len;
-            uint32_t origin_crc =
-                (data_len == kBlockSize
-                     ? net::BigEndian::Uint32(p + data_len - 4)
-                     : chunks[i].crc);
+            uint32_t origin_crc = net::BigEndian::Uint32(p + data_len - 4);
             if (crc != origin_crc) {
                 s.Set(ErrCode::ErrInvalidChecksum);
                 co_return s;
             }
-            if (blocks > 0) {
-                result.emplace_back(
-                    std::move(buf.share(j * kBlockSize, data_len)));
-            } else if ((last_block_len + 4) < data_len) {
-                auto buffer = buf.share(j * kBlockSize, last_block_len + 4);
-                crc = crc32_gzip_refl(
-                    0, reinterpret_cast<const unsigned char*>(buffer.get()),
-                    last_block_len);
-                net::BigEndian::PutUint32(buffer.get_write() + last_block_len,
-                                          crc);
-                result.emplace_back(std::move(buffer));
-            } else if ((last_block_len + 4) == data_len) {
-                result.emplace_back(
-                    std::move(buf.share(j * kBlockSize, data_len)));
-            } else {
-                // never reach to here
-                s.Set(ErrCode::ErrUnExpect, "invalid data len");
-                co_return s;
-            }
         }
+        result.emplace_back(std::move(buf));
+    }
+
+    TmpBuffer& b = result.back();
+    if (last_block_len) {  // modify the last block crc
+        size_t last_block_n = b.size() & kBlockSizeMask;
+        if (last_block_n == 0) {
+            last_block_n = kBlockDataSize;
+        } else {
+            last_block_n -= 4;
+        }
+        size_t trim_len = last_block_n - last_block_len;
+        b.trim(b.size() - trim_len);
+        uint32_t crc = crc32_gzip_refl(0,
+                                       reinterpret_cast<const unsigned char*>(
+                                           b.end() - last_block_len - 4),
+                                       last_block_len);
+        net::BigEndian::PutUint32(b.get_write() + b.size() - 4, crc);
     }
     s.SetValue(std::move(result));
 
-    co_return s;
-}
-
-seastar::future<Status<seastar::temporary_buffer<char>>> Store::ReadBlock(
-    ExtentPtr extent_ptr, uint64_t off) {
-    Status<seastar::temporary_buffer<char>> s;
-
-    if (off % kBlockDataSize) {
-        s.Set(EINVAL);
-        co_return s;
-    }
-
-    if (off >= extent_ptr->len) {
-        s.Set(ERANGE);
-        co_return s;
-    }
-
-    uint32_t chunk_idx = off / kChunkDataSize;
-    auto chunk = extent_ptr->chunks[chunk_idx];
-    size_t chunk_off = off % kChunkDataSize;
-    if (chunk_off > chunk.len) {
-        s.Set(ErrCode::ErrUnExpect, "invalid chunk len");
-        co_return s;
-    }
-    size_t block_index = chunk_off / kBlockDataSize;
-    off = super_block_.DataOffset() + kChunkSize * chunk.index +
-          block_index * kBlockSize;
-
-    size_t len = std::min(kBlockDataSize, chunk.len - chunk_off);
-    auto buffer = dev_ptr_->Get(seastar::align_up(len + 4, kSectorSize));
-
-    auto st = co_await dev_ptr_->Read(off, buffer.get_write(),
-                                      seastar::align_up(len, kSectorSize));
-    if (!st.OK()) {
-        s.Set(st.Code(), st.Reason());
-        co_return s;
-    }
-    uint32_t origin_crc = 0;
-    if (len < kBlockDataSize) {
-        net::BigEndian::PutUint32(buffer.get_write() + len, chunk.crc);
-        origin_crc = chunk.crc;
-        LOG_INFO("read data len={} off={} crc={}", len, off, origin_crc);
-    } else {
-        origin_crc = net::BigEndian::Uint32(buffer.get() + len);
-    }
-    uint32_t crc = crc32_gzip_refl(
-        0, reinterpret_cast<const unsigned char*>(buffer.get()), len);
-    if (crc != origin_crc) {
-        s.Set(ErrCode::ErrInvalidChecksum);
-    } else {
-        buffer.trim(len + 4);
-        s.SetValue(std::move(buffer));
-    }
     co_return s;
 }
 
