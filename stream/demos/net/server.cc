@@ -56,7 +56,7 @@ seastar::future<> test_server(uint16_t port) {
         auto conn = snail::net::TcpConnection::make_connection(
             std::move(std::get<0>(ar)), std::get<1>(ar));
         snail::net::Option opt;
-        auto sess = snail::net::Session::make_session(opt, conn, false);
+        auto sess = snail::net::TcpSession::make_session(opt, conn, false);
         (void)handle_sess(sess);
     }
     co_return;

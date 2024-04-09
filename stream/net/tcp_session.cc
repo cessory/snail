@@ -27,8 +27,8 @@ class DefaultBufferAllocator : public BufferAllocator {
     }
 };
 
-Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
-                 std::unique_ptr<BufferAllocator> allocator)
+TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
+                       std::unique_ptr<BufferAllocator> allocator)
     : opt_(opt),
       max_receive_buffer_(
           std::max(32 * opt.max_frame_size, kMinReceiveBufferSize)),
@@ -48,18 +48,18 @@ Session::Session(const Option &opt, TcpConnectionPtr conn, bool client,
     }
 }
 
-SessionPtr Session::make_session(const Option &opt, TcpConnectionPtr conn,
-                                 bool client,
-                                 std::unique_ptr<BufferAllocator> allocator) {
-    SessionPtr sess_ptr = seastar::make_lw_shared<Session>(
-        opt, conn, client, std::move(allocator));
+SessionPtr TcpSession::make_session(
+    const Option &opt, TcpConnectionPtr conn, bool client,
+    std::unique_ptr<BufferAllocator> allocator) {
+    auto sess_ptr = seastar::make_shared<TcpSession>(opt, conn, client,
+                                                     std::move(allocator));
     sess_ptr->recv_fu_ = sess_ptr->RecvLoop();
     sess_ptr->send_fu_ = sess_ptr->SendLoop();
     sess_ptr->StartKeepalive();
-    return sess_ptr;
+    return seastar::dynamic_pointer_cast<Session, TcpSession>(sess_ptr);
 }
 
-seastar::future<> Session::RecvLoop() {
+seastar::future<> TcpSession::RecvLoop() {
     auto ptr = shared_from_this();
     auto defer = seastar::defer([this] {
         conn_->Close();
@@ -98,9 +98,11 @@ seastar::future<> Session::RecvLoop() {
             case CmdType::SYN: {
                 auto it = streams_.find(f.sid);
                 if (it == streams_.end()) {
-                    StreamPtr stream = Stream::make_stream(
+                    StreamPtr stream = TcpStream::make_stream(
                         f.sid, f.ver, opt_.max_frame_size, shared_from_this());
-                    streams_[f.sid] = stream;
+                    streams_[f.sid] =
+                        seastar::dynamic_pointer_cast<TcpStream, Stream>(
+                            stream);
                     try {
                         co_await accept_sem_.wait();
                     } catch (std::exception &e) {
@@ -172,7 +174,7 @@ seastar::future<> Session::RecvLoop() {
     co_return;
 }
 
-seastar::future<> Session::SendLoop() {
+seastar::future<> TcpSession::SendLoop() {
     static uint32_t max_packet_num = IOV_MAX;
     auto ptr = shared_from_this();
     seastar::timer<seastar::steady_clock_type> write_timer;
@@ -201,7 +203,7 @@ seastar::future<> Session::SendLoop() {
 
     while (!die_ && status_.OK()) {
         Status<> s;
-        std::queue<Session::write_request *> sent_q;
+        std::queue<TcpSession::write_request *> sent_q;
         seastar::net::packet packet;
         uint32_t packet_n = 0;
         for (int i = 0; i < write_q_.size(); i++) {
@@ -256,7 +258,7 @@ seastar::future<> Session::SendLoop() {
     co_return;
 }
 
-void Session::StartKeepalive() {
+void TcpSession::StartKeepalive() {
     if (opt_.keep_alive_enable && client_) {
         keepalive_timer_.set_callback([this]() { WritePing(); });
         keepalive_timer_.rearm_periodic(
@@ -264,15 +266,15 @@ void Session::StartKeepalive() {
     }
 }
 
-void Session::ReturnTokens(uint32_t n) {
+void TcpSession::ReturnTokens(uint32_t n) {
     tokens_ += n;
     if (tokens_ > 0) {
         token_cv_.signal();
     }
 }
 
-seastar::future<Status<>> Session::WriteFrameInternal(Frame f,
-                                                      ClassID classid) {
+seastar::future<Status<>> TcpSession::WriteFrameInternal(Frame f,
+                                                         ClassID classid) {
     Status<> s;
     if (die_) {
         s.Set(EPIPE);
@@ -295,7 +297,7 @@ seastar::future<Status<>> Session::WriteFrameInternal(Frame f,
     co_return s;
 }
 
-void Session::WritePing() {
+void TcpSession::WritePing() {
     if (die_) {
         return;
     }
@@ -314,7 +316,7 @@ void Session::WritePing() {
     return;
 }
 
-seastar::future<Status<StreamPtr>> Session::OpenStream() {
+seastar::future<Status<StreamPtr>> TcpSession::OpenStream() {
     Status<StreamPtr> s;
     if (die_) {
         s.Set(EPIPE);
@@ -328,7 +330,7 @@ seastar::future<Status<StreamPtr>> Session::OpenStream() {
     next_id_ = id;
 
     auto stream =
-        Stream::make_stream(id, 2, opt_.max_frame_size, shared_from_this());
+        TcpStream::make_stream(id, 2, opt_.max_frame_size, shared_from_this());
     Frame frame;
     frame.ver = 2;
     frame.cmd = CmdType::SYN;
@@ -346,12 +348,12 @@ seastar::future<Status<StreamPtr>> Session::OpenStream() {
         s.Set(status_.Code(), status_.Reason());
         co_return s;
     }
-    streams_[id] = stream;
+    streams_[id] = seastar::dynamic_pointer_cast<TcpStream, Stream>(stream);
     s.SetValue(stream);
     co_return s;
 }
 
-seastar::future<Status<StreamPtr>> Session::AcceptStream() {
+seastar::future<Status<StreamPtr>> TcpSession::AcceptStream() {
     Status<StreamPtr> s;
     for (;;) {
         if (die_) {
@@ -377,7 +379,7 @@ seastar::future<Status<StreamPtr>> Session::AcceptStream() {
     co_return s;
 }
 
-seastar::future<> Session::Close() {
+seastar::future<> TcpSession::Close() {
     if (!die_) {
         die_ = true;
         w_cv_.signal();
@@ -393,7 +395,7 @@ seastar::future<> Session::Close() {
     co_return;
 }
 
-void Session::CloseAllStreams() {
+void TcpSession::CloseAllStreams() {
     for (auto &iter : streams_) {
         iter.second->SessionClose();
     }

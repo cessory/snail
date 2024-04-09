@@ -20,7 +20,7 @@ seastar::future<> TcpServer::Start() {
         auto conn = net::TcpConnection::make_connection(
             std::move(std::get<0>(ar)), std::get<1>(ar));
         net::Option opt;
-        auto sess = net::Session::make_session(opt, conn, false);
+        auto sess = net::TcpSession::make_session(opt, conn, false);
         (void)HandleSession(sess);
     }
 }

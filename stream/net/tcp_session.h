@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "frame.h"
+#include "session.h"
 #include "tcp_connection.h"
 #include "tcp_stream.h"
 #include "util/status.h"
@@ -17,20 +18,8 @@
 namespace snail {
 namespace net {
 
-struct Option {
-    bool keep_alive_enable = true;
-    int keep_alive_interval = 10;      // unit: s
-    int write_timeout_s = 10;          // unit: s
-    uint32_t max_frame_size = 131072;  // 128K
-};
-
-class BufferAllocator {
-   public:
-    virtual ~BufferAllocator() = default;
-    virtual seastar::temporary_buffer<char> Allocate(size_t len) = 0;
-};
-
-class Session : public seastar::enable_lw_shared_from_this<Session> {
+class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
+                   public Session {
     Option opt_;
     uint32_t max_receive_buffer_;
     uint32_t max_stream_buffer_;
@@ -39,7 +28,7 @@ class Session : public seastar::enable_lw_shared_from_this<Session> {
     std::unique_ptr<BufferAllocator> allocator_;
     uint32_t next_id_;
 
-    std::unordered_map<uint32_t, StreamPtr> streams_;
+    std::unordered_map<uint32_t, TcpStreamPtr> streams_;
     bool die_;
     std::optional<seastar::future<>> recv_fu_;
     std::optional<seastar::future<>> send_fu_;
@@ -98,17 +87,17 @@ class Session : public seastar::enable_lw_shared_from_this<Session> {
 
     void CloseAllStreams();
 
-    friend class Stream;
+    friend class TcpStream;
 
    public:
-    explicit Session(const Option &opt, TcpConnectionPtr conn, bool client,
-                     std::unique_ptr<BufferAllocator> allocator = nullptr);
+    explicit TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
+                        std::unique_ptr<BufferAllocator> allocator = nullptr);
 
     static SessionPtr make_session(
         const Option &opt, TcpConnectionPtr conn, bool client,
         std::unique_ptr<BufferAllocator> allocator = nullptr);
 
-    ~Session() { std::cout << "session deconstructer" << std::endl; }
+    virtual ~TcpSession() {}
 
     seastar::future<Status<StreamPtr>> OpenStream();
 
@@ -116,9 +105,9 @@ class Session : public seastar::enable_lw_shared_from_this<Session> {
 
     size_t Streams() const { return streams_.size(); }
 
-    std::string LocalAddress() { return conn_->LocalAddress(); }
+    std::string LocalAddress() const { return conn_->LocalAddress(); }
 
-    std::string RemoteAddress() { return conn_->RemoteAddress(); }
+    std::string RemoteAddress() const { return conn_->RemoteAddress(); }
 
     seastar::future<> Close();
 };

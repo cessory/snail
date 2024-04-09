@@ -2,6 +2,7 @@
 
 #include <isa-l.h>
 
+#include <seastar/core/when_all.hh>
 #include <seastar/util/defer.hh>
 #include <string_view>
 
@@ -188,7 +189,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
         size_t data_len = 0;
         for (const char *p = b.get(); p < b.end(); p += kBlockSize) {
             size_t n = std::min(kBlockSize, (size_t)(b.end() - p));
-            if (n < = 4) {
+            if (n <= 4) {
                 s.Set(EBADMSG);
                 co_return s;
             }
@@ -205,7 +206,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             co_return s;
         }
         len -= data_len;
-        if (buffer.size() == 4) {
+        if (buffers.size() == 4) {
             if (fu) {
                 s = co_await std::move(fu.value());
                 if (!s) {
@@ -244,13 +245,66 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
 }
 
 static seastar::future<Status<>> WriteFrames(net::StreamPtr stream,
-                                             std::vector<TmpBuffer> buffers) {
+                                             std::vector<TmpBuffer> buffers,
+                                             bool first, bool last,
+                                             size_t trim_front_len,
+                                             size_t trim_len) {
     Status<> s;
     int n = buffers.size();
     std::vector<seastar::future<Status<>>> fu_vec;
+    std::vector<TmpBuffer> first_frame;
+    std::vector<TmpBuffer> last_frame;
     for (int i = 0; i < n; ++i) {
-        auto f = stream->WriteFrame(std::move(buffers[i]));
-        fu_vec.emplace_back(std::move(f));
+        TmpBuffer buf = std::move(buffers[i]);
+        if (i == 0 && first && trim_front_len) {
+            TmpBuffer first_block =
+                buf.share(trim_front_len,
+                          std::min(kBlockSize, buf.size()) - trim_front_len);
+            buf.trim_front(std::min(kBlockSize, buf.size()));
+
+            if (i == n - 1 && last && trim_len && buf.empty()) {
+                first_block.trim(first_block.size() - trim_len);
+            }
+
+            TmpBuffer first_block_crc(4);
+            net::BigEndian::PutUint32(
+                first_block_crc.get_write(),
+                crc32_gzip_refl(0, (const unsigned char *)(first_block.get()),
+                                first_block.size() - 4));
+            first_frame.emplace_back(
+                std::move(first_block.share(0, first_block.size() - 4)));
+            first_frame.emplace_back(std::move(first_block_crc));
+        }
+        if (i == n - 1 && last && trim_len && buf.size()) {
+            int blocks = buf.size() / kBlockSize;
+            TmpBuffer last_block =
+                buf.share(blocks * kBlockSize, buf.size() % kBlockSize);
+            buf.trim(last_block.size());
+            last_block.trim(trim_len);
+            TmpBuffer last_block_crc(4);
+            net::BigEndian::PutUint32(
+                last_block_crc.get_write(),
+                crc32_gzip_refl(0, (const unsigned char *)(last_block.get()),
+                                last_block.size() - 4));
+            last_frame.emplace_back(
+                std::move(last_block.share(0, last_block.size() - 4)));
+            last_frame.emplace_back(std::move(last_block_crc));
+        }
+
+        if (first_frame.size()) {
+            auto f = stream->WriteFrame(std::move(first_frame));
+            fu_vec.emplace_back(std::move(f));
+        }
+
+        if (buf.size()) {
+            auto f = stream->WriteFrame(std::move(buf));
+            fu_vec.emplace_back(std::move(f));
+        }
+
+        if (last_frame.size()) {
+            auto f = stream->WriteFrame(std::move(last_frame));
+            fu_vec.emplace_back(std::move(f));
+        }
     }
 
     auto res = co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
@@ -312,80 +366,85 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     uint64_t origin_off = off;
 
     off = off / kBlockDataSize * kBlockDataSize;
-    len = origin_len + origin_off - off;
+    uint64_t trim_front_len = origin_off - off;
+    len = origin_len + trim_front_len;
     uint64_t aligned_len =
         (len + kBlockDataSize - 1) / kBlockDataSize * kBlockDataSize;
     if (aligned_len + off <= extent_ptr->len) {
         len = aligned_len;  // prefetch
     }
-    size_t max_frame_size =
-        stream->MaxFrameSize() / kBlockSize * kBlockDataSize;
+    uint64_t trim_len = len - origin_len - trim_front_len;
+    size_t max_data_size = stream->MaxFrameSize() / kBlockSize * kBlockDataSize;
 
     bool first = false;
     std::optional<seastar::future<Status<>>> fu;
     std::vector<TmpBuffer> buffers;
-    uint64_t offset = off;
     while (len > 0) {
-        size_t n = std::min(max_frame_size, len);
-        len -= n;
-        size_t tmp_n = n;
-        size_t extent_off = offset;
+        size_t bytes = std::min(max_data_size, len);
+        len -= bytes;
         size_t need_to_read = 0;
-        while (tmp_n > 0) {
-            size_t tmp_len = std::min(tmp_n, kBlockDataSize);
-            tmp_n -= tmp_len;
-            BlockCacheKey key(extent_id, offset);
+        size_t read_off = off;
+        while (bytes > 0) {
+            size_t n = std::min(bytes, kBlockDataSize);
+            bytes -= n;
+            BlockCacheKey key(extent_id, off);
             auto v = block_cache_.Get(key);
-            if (!v.has_value()) {
-                need_to_read += tmp_len;
-                continue;
+            if (!v.has_value() || v.value().size() < n + 4) {
+                need_to_read += n;
+                if (bytes != 0) continue;
+            }
+
+            if (v.has_value() && v.value().size() - 4 > n) {
+                // only happened when this is the last block data
+                trim_len += v.value().size() - 4 - n;
             }
 
             if (fu) {
                 s = co_await std::move(fu.value());
                 if (!s) {
+                    LOG_ERROR("reply data to {} error: {}",
+                              stream->RemoteAddress(), s.String());
                     co_return s;
                 }
                 fu.reset();
             }
 
-            auto st = co_await store_->Read(extent_ptr, extent_off, tmp_len);
-            if (!st) {
-                s.Set(st.Code(), st.Reason());
-                co_return s;  // return error, then close stream
+            std::vector<TmpBuffer> buffers;
+            if (need_to_read > 0) {
+                auto st =
+                    co_await store_->Read(extent_ptr, read_off, need_to_read);
+                if (!st) {
+                    s.Set(st.Code(), st.Reason());
+                    co_return s;  // return error, then close stream
+                }
+                buffers = std::move(st.Value());
+                for (int i = 0; i < buffers.size(); ++i) {
+                    for (size_t pos = 0; pos < buffers[i].size();) {
+                        size_t share_len =
+                            std::min(kBlockSize, buffers[i].size() - pos);
+                        auto tmp_block_buffer =
+                            buffers[i].share(pos, share_len);
+                        BlockCacheKey bkey(extent_ptr->id, off);
+                        block_cache_.Insert(bkey, tmp_block_buffer);
+                        pos += share_len;
+                        off += share_len - 4;
+                    }
+                }
+                if (v.has_value()) {
+                    off += v.value().size() - 4;
+                    buffers.emplace_back(std::move(v.value()));
+                }
+                need_to_read = 0;
+            } else {
+                off += v.value().size() - 4;
+                buffers.emplace_back(std::move(v.value()));
             }
-            fu = WriteFrames(std::move(st.Value()));
-        }
 
-        auto st = co_await store_->Read(extent_ptr, i, n);
-        if (!st) {
-            s.Set(st.Code(), st.Reason());
-            co_return s;  // return error, then close stream
+            fu = WriteFrames(stream, std::move(buffers), first, len == 0,
+                             trim_front_len, trim_len);
+            first = false;
+            read_off = off;
         }
-        std::vector<TmpBuffer> result = std::move(st.Value());
-        if (i == off && origin_off != off) {
-            // TODO if result[0] is from cache, we should clone it, then modify
-            // crc
-            result[0].trim_front(origin_off - off);
-            uint32_t crc = crc32_gzip_refl(
-                0, reinterpret_cast<const unsigned char *>(result[0].get()),
-                result[0].size() - 4);
-            net::BigEndian::PutUint32(
-                result[0].get_write() + result[0].size() - 4, crc);
-        }
-        if (fu) {
-            s = co_await std::move(fu.value());
-            if (!s) {
-                co_return s;
-            }
-            fu.reset();
-        }
-        std::vector<iovec> iov;
-        buffers = std::move(result);
-        for (int j = 0; j < result.size(); j++) {
-            iov.push_back({result[j].get_write(), result[j].size()});
-        }
-        fu = stream->WriteFrame(std::move(iov));
     }
 
     if (fu) {

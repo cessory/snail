@@ -10,22 +10,23 @@
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/timer.hh>
 
+#include "session.h"
 #include "util/status.h"
 
 namespace snail {
 namespace net {
 
-class Stream;
-class Session;
+class TcpStream;
+class TcpSession;
 
-using SessionPtr = seastar::lw_shared_ptr<Session>;
-using StreamPtr = seastar::lw_shared_ptr<Stream>;
+using TcpSessionPtr = seastar::shared_ptr<TcpSession>;
+using TcpStreamPtr = seastar::shared_ptr<TcpStream>;
 
-class Stream {
+class TcpStream : public Stream {
     uint32_t id_;
     uint8_t ver_;
     uint32_t frame_size_;
-    SessionPtr sess_;
+    TcpSessionPtr sess_;
     std::queue<seastar::temporary_buffer<char>> buffers_;
     size_t buffer_size_ = 0;
     seastar::condition_variable r_cv_;
@@ -39,7 +40,7 @@ class Stream {
     uint32_t remote_wnd_;
     seastar::condition_variable wnd_cv_;
 
-    friend class Session;
+    friend class TcpSession;
 
    private:
     seastar::future<> WaitSess();
@@ -57,13 +58,13 @@ class Stream {
     void Update(uint32_t consumed, uint32_t window);
 
    public:
-    explicit Stream(uint32_t id, uint8_t ver, uint32_t frame_size,
-                    SessionPtr sess);
+    explicit TcpStream(uint32_t id, uint8_t ver, uint32_t frame_size,
+                       TcpSessionPtr sess);
 
-    ~Stream() { sess_.release(); }
+    virtual ~TcpStream() { sess_ = nullptr; }
 
     static StreamPtr make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
-                                 SessionPtr sess);
+                                 TcpSessionPtr sess);
 
     uint32_t ID() const { return id_; }
 
@@ -79,6 +80,10 @@ class Stream {
     seastar::future<Status<>> WriteFrame(seastar::temporary_buffer<char> b);
     seastar::future<Status<>> WriteFrame(
         std::vector<seastar::temporary_buffer<char>> buffers);
+
+    std::string LocalAddress() const;
+
+    std::string RemoteAddress() const;
 
     seastar::future<> Close();
 };

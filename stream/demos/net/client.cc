@@ -54,7 +54,7 @@ seastar::future<> test_client(uint16_t port) {
     auto conn = snail::net::TcpConnection::make_connection(std::move(fd), sa);
 
     snail::net::Option opt;
-    auto sess = snail::net::Session::make_session(opt, conn, true);
+    auto sess = snail::net::TcpSession::make_session(opt, conn, true);
 
     std::vector<seastar::future<>> fu_vec;
     for (int i = 0; i < 10; i++) {
