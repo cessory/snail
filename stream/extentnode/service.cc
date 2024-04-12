@@ -144,6 +144,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     const std::string &eid_str = req->extent_id();
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
+        LOG_ERROR("reqid={} parse extent_id={} error", reqid, eid_str);
         s = co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP,
                                     (ErrCode)EINVAL);
         co_return s;
@@ -151,6 +152,9 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
 
     if (diskid != store_->DeviceId()) {
         s.Set(ErrCode::ErrDiskNotMatch);
+        LOG_ERROR("reqid={} extent_id={}-{} diskid={} devid={} error: {}",
+                  reqid, extent_id.hi, extent_id.lo, diskid, store_->DeviceId(),
+                  s.String());
         s = co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
@@ -158,12 +162,16 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     auto extent_ptr = store_->GetExtent(extent_id);
     if (!extent_ptr) {
         s.Set(ErrCode::ErrNoExtent);
+        LOG_ERROR("reqid={} extent_id={}-{} diskid={} error: {}", reqid,
+                  extent_id.hi, extent_id.lo, diskid, s.String());
         s = co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
 
     if (!extent_ptr->mu.try_lock()) {
         s.Set(ErrCode::ErrParallelWrite);
+        LOG_ERROR("reqid={} extent_id={}-{} diskid={} error: {}", reqid,
+                  extent_id.hi, extent_id.lo, diskid, s.String());
         s = co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
@@ -178,11 +186,17 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     while (len > 0) {
         auto st = co_await stream->ReadFrame();
         if (!st) {
+            LOG_ERROR(
+                "reqid={} extent_id={}-{} diskid={} read data frame error: {}",
+                reqid, extent_id.hi, extent_id.lo, diskid, st.String());
             s.Set(st.Code(), st.Reason());
             co_return s;
         }
         auto b = std::move(st.Value());
+        LOG_INFO("read data len={}", b.size());
         if (b.size() <= 4) {
+            LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
+                      reqid, extent_id.hi, extent_id.lo, diskid);
             s.Set(EBADMSG);
             co_return s;
         }
@@ -190,6 +204,8 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
         for (const char *p = b.get(); p < b.end(); p += kBlockSize) {
             size_t n = std::min(kBlockSize, (size_t)(b.end() - p));
             if (n <= 4) {
+                LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
+                          reqid, extent_id.hi, extent_id.lo, diskid);
                 s.Set(EBADMSG);
                 co_return s;
             }
@@ -197,11 +213,17 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             uint32_t crc = crc32_gzip_refl(0, (const unsigned char *)p, n - 4);
             uint32_t origin_crc = net::BigEndian::Uint32(p + n - 4);
             if (crc != origin_crc) {
+                LOG_ERROR(
+                    "reqid={} extent_id={}-{} diskid={} data has invalid "
+                    "checksum",
+                    reqid, extent_id.hi, extent_id.lo, diskid);
                 s.Set(ErrCode::ErrInvalidChecksum);
                 co_return s;
             }
         }
         if (len < data_len) {
+            LOG_ERROR("reqid={} extent_id={}-{} diskid={} invalid len", reqid,
+                      extent_id.hi, extent_id.lo, diskid);
             s.Set(EBADMSG);
             co_return s;
         }
@@ -422,10 +444,13 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
                     for (size_t pos = 0; pos < buffers[i].size();) {
                         size_t share_len =
                             std::min(kBlockSize, buffers[i].size() - pos);
-                        auto tmp_block_buffer =
-                            buffers[i].share(pos, share_len);
-                        BlockCacheKey bkey(extent_ptr->id, off);
-                        block_cache_.Insert(bkey, tmp_block_buffer);
+                        if (len == 0) {
+                            // the last data add to cache
+                            auto tmp_block_buffer =
+                                buffers[i].share(pos, share_len);
+                            BlockCacheKey bkey(extent_ptr->id, off);
+                            block_cache_.Insert(bkey, tmp_block_buffer);
+                        }
                         pos += share_len;
                         off += share_len - 4;
                     }

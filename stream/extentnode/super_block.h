@@ -38,6 +38,7 @@ struct SuperBlock {
         version = x.version;
         cluster_id = x.cluster_id;
         dev_type = x.dev_type;
+        dev_id = x.dev_id;
         capacity = x.capacity;
         pt = x.pt;
     }
@@ -48,6 +49,7 @@ struct SuperBlock {
             version = x.version;
             cluster_id = x.cluster_id;
             dev_type = x.dev_type;
+            dev_id = x.dev_id;
             capacity = x.capacity;
             pt = x.pt;
         }

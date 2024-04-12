@@ -41,7 +41,7 @@ class Service {
     LRUCache<BlockCacheKey, TmpBuffer> block_cache_;
 
    public:
-    explicit Service(StorePtr store, size_t capacity = 32768)
+    explicit Service(StorePtr store, size_t capacity = 8192)
         : store_(store), block_cache_(capacity) {}
 
     seastar::future<Status<>> HandleWriteExtent(const WriteExtentReq *req,
