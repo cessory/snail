@@ -182,6 +182,8 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     std::optional<seastar::future<Status<>>> fu;
     uint64_t sent = 0;
     uint64_t ready = 0;
+    bool first_block = true;
+    size_t first_block_len = kBlockDataSize - off % kBlockDataSize;
 
     while (len > 0) {
         auto st = co_await stream->ReadFrame();
@@ -193,7 +195,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             co_return s;
         }
         auto b = std::move(st.Value());
-        LOG_INFO("read data len={}", b.size());
         if (b.size() <= 4) {
             LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
                       reqid, extent_id.hi, extent_id.lo, diskid);
@@ -201,8 +202,11 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             co_return s;
         }
         size_t data_len = 0;
-        for (const char *p = b.get(); p < b.end(); p += kBlockSize) {
-            size_t n = std::min(kBlockSize, (size_t)(b.end() - p));
+        for (const char *p = b.get(); p < b.end();) {
+            size_t n =
+                first_block
+                    ? std::min(first_block_len + 4, (size_t)(b.end() - p))
+                    : std::min(kBlockSize, (size_t)(b.end() - p));
             if (n <= 4) {
                 LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
                           reqid, extent_id.hi, extent_id.lo, diskid);
@@ -215,11 +219,13 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             if (crc != origin_crc) {
                 LOG_ERROR(
                     "reqid={} extent_id={}-{} diskid={} data has invalid "
-                    "checksum",
-                    reqid, extent_id.hi, extent_id.lo, diskid);
+                    "checksum n={}",
+                    reqid, extent_id.hi, extent_id.lo, diskid, n);
                 s.Set(ErrCode::ErrInvalidChecksum);
                 co_return s;
             }
+            p += n;
+            first_block = false;
         }
         if (len < data_len) {
             LOG_ERROR("reqid={} extent_id={}-{} diskid={} invalid len", reqid,
@@ -273,8 +279,7 @@ static seastar::future<Status<>> WriteFrames(net::StreamPtr stream,
                                              size_t trim_len) {
     Status<> s;
     int n = buffers.size();
-    std::vector<seastar::future<Status<>>> fu_vec;
-    std::vector<TmpBuffer> first_frame;
+    std::vector<TmpBuffer> send_frame;
     std::vector<TmpBuffer> last_frame;
     for (int i = 0; i < n; ++i) {
         TmpBuffer buf = std::move(buffers[i]);
@@ -293,16 +298,20 @@ static seastar::future<Status<>> WriteFrames(net::StreamPtr stream,
                 first_block_crc.get_write(),
                 crc32_gzip_refl(0, (const unsigned char *)(first_block.get()),
                                 first_block.size() - 4));
-            first_frame.emplace_back(
+            send_frame.emplace_back(
                 std::move(first_block.share(0, first_block.size() - 4)));
-            first_frame.emplace_back(std::move(first_block_crc));
+            send_frame.emplace_back(std::move(first_block_crc));
         }
         if (i == n - 1 && last && trim_len && buf.size()) {
-            int blocks = buf.size() / kBlockSize;
-            TmpBuffer last_block =
-                buf.share(blocks * kBlockSize, buf.size() % kBlockSize);
-            buf.trim(last_block.size());
-            last_block.trim(trim_len);
+            size_t last_block_pos = seastar::align_down(buf.size(), kBlockSize);
+            size_t last_block_remain = buf.size() & kBlockSizeMask;
+            if (last_block_remain == 0 && last_block_pos) {
+                last_block_pos -= kBlockSize;
+                last_block_remain = kBlockSize;
+            }
+            TmpBuffer last_block = buf.share(last_block_pos, last_block_remain);
+            buf.trim(buf.size() - last_block.size());
+            last_block.trim(last_block_remain - trim_len);
             TmpBuffer last_block_crc(4);
             net::BigEndian::PutUint32(
                 last_block_crc.get_write(),
@@ -313,29 +322,17 @@ static seastar::future<Status<>> WriteFrames(net::StreamPtr stream,
             last_frame.emplace_back(std::move(last_block_crc));
         }
 
-        if (first_frame.size()) {
-            auto f = stream->WriteFrame(std::move(first_frame));
-            fu_vec.emplace_back(std::move(f));
-        }
-
         if (buf.size()) {
-            auto f = stream->WriteFrame(std::move(buf));
-            fu_vec.emplace_back(std::move(f));
+            send_frame.emplace_back(std::move(buf));
         }
 
-        if (last_frame.size()) {
-            auto f = stream->WriteFrame(std::move(last_frame));
-            fu_vec.emplace_back(std::move(f));
+        for (int i = 0; i < last_frame.size(); i++) {
+            send_frame.emplace_back(std::move(last_frame[i]));
         }
     }
 
-    auto res = co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
-    for (int i = 0; i < n; ++i) {
-        if (!res[i]) {
-            s = std::move(res[i]);
-            break;
-        }
-    }
+    s = co_await stream->WriteFrame(std::move(send_frame));
+
     co_return s;
 }
 
@@ -398,7 +395,7 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     uint64_t trim_len = len - origin_len - trim_front_len;
     size_t max_data_size = stream->MaxFrameSize() / kBlockSize * kBlockDataSize;
 
-    bool first = false;
+    bool first = true;
     std::optional<seastar::future<Status<>>> fu;
     std::vector<TmpBuffer> buffers;
     while (len > 0) {
@@ -413,10 +410,12 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
             auto v = block_cache_.Get(key);
             if (!v.has_value() || v.value().size() < n + 4) {
                 need_to_read += n;
+                v.reset();
                 if (bytes != 0) continue;
             }
 
-            if (v.has_value() && v.value().size() - 4 > n) {
+            if (v.has_value() && v.value().size() > n + 4 && len == 0 &&
+                bytes == 0) {
                 // only happened when this is the last block data
                 trim_len += v.value().size() - 4 - n;
             }
@@ -444,13 +443,10 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
                     for (size_t pos = 0; pos < buffers[i].size();) {
                         size_t share_len =
                             std::min(kBlockSize, buffers[i].size() - pos);
-                        if (len == 0) {
-                            // the last data add to cache
-                            auto tmp_block_buffer =
-                                buffers[i].share(pos, share_len);
-                            BlockCacheKey bkey(extent_ptr->id, off);
-                            block_cache_.Insert(bkey, tmp_block_buffer);
-                        }
+                        auto tmp_block_buffer =
+                            buffers[i].share(pos, share_len);
+                        BlockCacheKey bkey(extent_ptr->id, off);
+                        block_cache_.Insert(bkey, tmp_block_buffer);
                         pos += share_len;
                         off += share_len - 4;
                     }
@@ -465,8 +461,9 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
                 buffers.emplace_back(std::move(v.value()));
             }
 
-            fu = WriteFrames(stream, std::move(buffers), first, len == 0,
-                             trim_front_len, trim_len);
+            fu =
+                WriteFrames(stream, std::move(buffers), first,
+                            (len == 0 && bytes == 0), trim_front_len, trim_len);
             first = false;
             read_off = off;
         }

@@ -62,7 +62,11 @@ class MemStream : public net::Stream {
         co_return s;
     }
     seastar::future<Status<>> WriteFrame(const char *b, size_t n) {
-        seastar::temporary_buffer<char> buf(b, n);
+        seastar::temporary_buffer<char> buf =
+            seastar::temporary_buffer<char>::aligned(
+                kMemoryAlignment, std::max(kMemoryAlignment, n));
+        memcpy(buf.get_write(), b, n);
+        buf.trim(n);
         send_q_->push(std::move(buf));
         send_cv_->signal();
         co_return Status<>();
@@ -86,7 +90,10 @@ class MemStream : public net::Stream {
             s.Set(EMSGSIZE);
             co_return s;
         }
-        seastar::temporary_buffer<char> buffer(n);
+        seastar::temporary_buffer<char> buffer =
+            seastar::temporary_buffer<char>::aligned(
+                kMemoryAlignment, std::max(kMemoryAlignment, n));
+        buffer.trim(n);
         char *p = buffer.get_write();
         for (int i = 0; i < iov.size(); ++i) {
             memcpy(p, iov[i].iov_base, iov[i].iov_len);
@@ -130,7 +137,10 @@ class MemStream : public net::Stream {
             s.Set(EMSGSIZE);
             co_return s;
         }
-        seastar::temporary_buffer<char> buffer(n);
+        seastar::temporary_buffer<char> buffer =
+            seastar::temporary_buffer<char>::aligned(
+                kMemoryAlignment, std::max(kMemoryAlignment, n));
+        buffer.trim(n);
         char *p = buffer.get_write();
 
         for (int i = 0; i < buffers.size(); ++i) {

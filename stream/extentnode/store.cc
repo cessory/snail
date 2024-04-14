@@ -656,9 +656,8 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
         s.Set(EINVAL);
         return s;
     }
-
-    if (len > last_block_free_size &&
-        ((len - last_block_free_size) & kBlockSizeMask) <= 4) {
+    size_t block_remain = (len - last_block_free_size) & kBlockSizeMask;
+    if (len > last_block_free_size && block_remain > 0 && block_remain <= 4) {
         LOG_ERROR("data len={} invalid last_block_free_size={}", len,
                   last_block_free_size);
         s.Set(EINVAL);
@@ -666,8 +665,10 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
     }
 
     if (last_sector_size != last_sector_cached_data.size()) {
-        LOG_ERROR("last_sector_size={} is not match with cached data size={}",
-                  last_sector_size, last_sector_cached_data.size());
+        LOG_ERROR(
+            "last_sector_size={} is not match with cached data size={} chunk "
+            "len={}",
+            last_sector_size, last_sector_cached_data.size(), chunk.len);
         s.Set(ErrCode::ErrUnExpect,
               "last sector size is not match with cached data size");
         return s;
@@ -681,12 +682,17 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
         return s;
     }
 
-    uint64_t data_len =
-        (len <= last_block_free_size)
-            ? len - 4
-            : (last_block_free_size - 4 +
-               (len - last_block_free_size) / kBlockSize * kBlockDataSize +
-               ((len - last_block_free_size) & kBlockSizeMask) - 4);
+    uint64_t data_len = 0;
+    if (len <= last_block_free_size) {
+        data_len = len - 4;
+    } else {
+        data_len = last_block_free_size - 4 +
+                   (len - last_block_free_size) / kBlockSize * kBlockDataSize;
+        size_t last_remain = (len - last_block_free_size) & kBlockSizeMask;
+        if (last_remain) {
+            data_len += last_remain - 4;
+        }
+    }
 
     // is_fill_block indicates whether the current data fills the
     // entire block

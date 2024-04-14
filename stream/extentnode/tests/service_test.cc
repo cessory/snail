@@ -65,6 +65,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
     uint64_t off = 0;
     size_t body_len = 1 << 20;
     TmpBuffer content(16 << 20);
+    memset(content.get_write(), 'a', content.size());
     // write 16M data
     for (int i = 0; i < 16; ++i, off += body_len) {
         std::unique_ptr<WriteExtentReq> req =
@@ -78,8 +79,20 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
         TmpBuffer body =
             content.share(off, std::min(body_len, content.size() - off));
         std::vector<TmpBuffer> packets;
+        size_t packets_len = 0;
+        bool first_block = true;
+        size_t first_block_len = kBlockDataSize - off % kBlockDataSize;
         for (size_t pos = 0; pos < body.size();) {
             size_t n = std::min(kBlockDataSize, (size_t)(body.size() - pos));
+            if (first_block) {
+                first_block = false;
+                n = std::min(first_block_len, n);
+            }
+            if (packets_len + n + 4 > client_stream->MaxFrameSize()) {
+                s = client_stream->WriteFrame(std::move(packets)).get0();
+                BOOST_REQUIRE(s);
+                packets_len = 0;
+            }
             uint32_t crc =
                 crc32_gzip_refl(0, (const unsigned char*)(body.get() + pos), n);
             TmpBuffer crc_buf(4);
@@ -87,13 +100,15 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
             packets.emplace_back(std::move(body.share(pos, n)));
             packets.emplace_back(std::move(crc_buf));
             pos += n;
+            packets_len += n + 4;
         }
 
-        LOG_INFO("write off={} len={}", off, body_len);
-        s = client_stream->WriteFrame(std::move(packets)).get0();
+        if (packets_len) {
+            s = client_stream->WriteFrame(std::move(packets)).get0();
+            BOOST_REQUIRE(s);
+        }
         s = service.HandleWriteExtent(req.get(), server_stream).get0();
         BOOST_REQUIRE(s);
-        LOG_INFO("write off={} len={} success, read response", off, body_len);
         auto st = client_stream->ReadFrame().get0();
         BOOST_REQUIRE(st);
         TmpBuffer resp_buf = std::move(st.Value());
@@ -102,56 +117,73 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
         BOOST_REQUIRE(
             ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type));
         BOOST_REQUIRE_EQUAL(resp->code(), static_cast<int>(ErrCode::OK));
-        BOOST_REQUIRE_EQUAL(extent_ptr->len, body_len);
+        BOOST_REQUIRE_EQUAL(extent_ptr->len, body_len * (i + 1));
     }
 
-    // read data by service interface
-    std::unique_ptr<ReadExtentReq> read_req(new ReadExtentReq);
-    read_req->mutable_base()->set_reqid("1234567");
-    read_req->set_diskid(1);
-    read_req->set_extent_id(std::string(str_extent_id, 16));
-    read_req->set_off(1233);
-    read_req->set_len(4 << 20);
+    uint64_t lens[4] = {4 << 20, 4 << 20, 4 << 20, (4 << 20) - 10};
+    uint64_t offs[4] = {1233, 1233, (16 << 20) - (4 << 20),
+                        (16 << 20) - (4 << 20)};
+    for (int i = 0; i < 4; i++) {
+        // the second read is hit cache
+        auto read_streams = MemStream::make_stream_pair();
+        net::StreamPtr read_client_stream = read_streams.first;
+        net::StreamPtr read_server_stream = read_streams.second;
+        // read data by service interface
+        std::unique_ptr<ReadExtentReq> read_req(new ReadExtentReq);
+        read_req->mutable_base()->set_reqid("1234567");
+        read_req->set_diskid(1);
+        read_req->set_extent_id(std::string(str_extent_id, 16));
+        read_req->set_off(offs[i]);
+        read_req->set_len(lens[i]);
 
-    LOG_INFO("begin read off={} len={}", read_req->off(), read_req->len());
-    auto fu =
-        service.HandleReadExtent(read_req.get(), server_stream)
-            .then([server_stream](auto f) { return server_stream->Close(); });
+        LOG_INFO("begin read i={} off={} len={}", i, read_req->off(),
+                 read_req->len());
+        auto fu = service.HandleReadExtent(read_req.get(), read_server_stream)
+                      .then([read_server_stream](auto f) {
+                          return read_server_stream->Close();
+                      });
 
-    auto st2 = client_stream->ReadFrame().get0();
-    BOOST_REQUIRE(st2);
-    TmpBuffer read_buf = std::move(st2.Value());
-    std::unique_ptr<ReadExtentResp> read_resp(new ReadExtentResp);
-    ExtentnodeMsgType type;
-    BOOST_REQUIRE(
-        ParseResponse(read_buf.get(), read_buf.size(), read_resp.get(), type));
-    BOOST_REQUIRE(type == ExtentnodeMsgType::READ_EXTENT_RESP);
-    BOOST_REQUIRE(read_resp->base().code() == static_cast<int>(ErrCode::OK));
-    BOOST_REQUIRE(read_resp->len() == (4 << 20));
-    // read data
-    size_t read_len = 0;
-    bool first = true;
-    size_t first_block_len = kBlockDataSize - 1233;
-    while (read_len < read_resp->len()) {
-        auto st3 = client_stream->ReadFrame().get0();
-        if (st3.Code() == ErrCode::ErrEOF) {
-            break;
+        auto st2 = read_client_stream->ReadFrame().get0();
+        BOOST_REQUIRE(st2);
+        TmpBuffer read_buf = std::move(st2.Value());
+        std::unique_ptr<ReadExtentResp> read_resp(new ReadExtentResp);
+        ExtentnodeMsgType type;
+        BOOST_REQUIRE(ParseResponse(read_buf.get(), read_buf.size(),
+                                    read_resp.get(), type));
+        BOOST_REQUIRE(type == ExtentnodeMsgType::READ_EXTENT_RESP);
+        BOOST_REQUIRE(read_resp->base().code() ==
+                      static_cast<int>(ErrCode::OK));
+        BOOST_REQUIRE(read_resp->len() == lens[i]);
+        // read data
+        size_t read_len = 0;
+        bool first = true;
+        size_t first_block_len = kBlockDataSize - offs[i] % kBlockDataSize;
+        while (read_len < read_resp->len()) {
+            auto st3 = read_client_stream->ReadFrame().get0();
+            if (st3.Code() == ErrCode::ErrEOF) {
+                break;
+            }
+            BOOST_REQUIRE(st3);
+            TmpBuffer b = std::move(st3.Value());
+            size_t data_len = b.size();
+            const char* p = b.get();
+            while (p < b.end()) {
+                size_t n = std::min(kBlockSize, (size_t)(b.end() - p));
+                if (first) {
+                    n = first_block_len + 4;
+                    first = false;
+                }
+                read_len += n - 4;
+                uint32_t origin_crc = net::BigEndian::Uint32(p + n - 4);
+                uint32_t crc =
+                    crc32_gzip_refl(0, (const unsigned char*)p, n - 4);
+                BOOST_REQUIRE_EQUAL(origin_crc, crc);
+                p += n;
+            }
         }
-        BOOST_REQUIRE(st3);
-        TmpBuffer b = std::move(st3.Value());
-        size_t data_len = b.size();
-        const char* p = b.get();
-        while (p < b.end()) {
-            size_t n = first ? first_block_len + 4
-                             : std::min(kBlockSize, (size_t)(b.end() - p));
-            read_len += n - 4;
-            uint32_t origin_crc = net::BigEndian::Uint32(p + n - 4);
-            uint32_t crc = crc32_gzip_refl(0, (const unsigned char*)p, n - 4);
-            BOOST_REQUIRE_EQUAL(origin_crc, crc);
-            p += n;
-        }
+        BOOST_REQUIRE_EQUAL(read_len, read_resp->len());
+        fu.get0();
     }
-    BOOST_REQUIRE_EQUAL(read_len, read_resp->len());
 
     store->Close().get();
 }

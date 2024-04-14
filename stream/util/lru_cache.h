@@ -157,7 +157,7 @@ class LRUCache<Key, seastar::temporary_buffer<char>> {
 
             // update iterator in map
             j = list_.begin();
-            value_type value = std::move(it->second.first);
+            value_type value = std::move(it->second.first.share());
             map_[key] = std::move(std::make_pair(value.share(), j));
 
             // return the value
