@@ -1,4 +1,5 @@
 #pragma once
+#include <fmt/ostream.h>
 #include <time.h>
 
 #include <seastar/core/shared_mutex.hh>
@@ -76,6 +77,12 @@ struct ExtentID {
         return (hi == x.hi && lo == x.lo);
     }
 
+    friend std::ostream& operator<<(std::ostream& os,
+                                    const ExtentID& extent_id) {
+        os << extent_id.hi << "-" << extent_id.lo;
+        return os;
+    }
+
     bool Parse(const std::string& str) {
         if (str.size() != 16) {
             return false;
@@ -85,10 +92,17 @@ struct ExtentID {
         return true;
     }
 
-    inline bool Empty() const { return (hi == 0 && lo == 0); }
+    bool Empty() const { return (hi == 0 && lo == 0); }
 
-    inline uint64_t Hash() const { return (hi << 32) & lo; }
+    uint64_t Hash() const;
 };
+
+#if FMT_VERSION >= 90000
+
+template <>
+struct fmt::formatter<ExtentID> : fmt::ostream_formatter {};
+
+#endif
 
 struct ChunkEntry {
     uint32_t index = -1;
@@ -165,7 +179,7 @@ namespace std {
 template <>
 struct hash<snail::stream::ExtentID> {
     size_t operator()(const snail::stream::ExtentID& x) const {
-        return std::hash<uint64_t>()(x.Hash());
+        return x.Hash();
     }
 };
 

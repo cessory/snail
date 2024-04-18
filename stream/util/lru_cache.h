@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 #include <list>
 #include <seastar/core/temporary_buffer.hh>
 #include <unordered_map>
@@ -159,7 +160,6 @@ class LRUCache<Key, seastar::temporary_buffer<char>> {
             j = list_.begin();
             value_type value = std::move(it->second.first.share());
             map_[key] = std::move(std::make_pair(value.share(), j));
-
             // return the value
             return std::move(value);
         } else {

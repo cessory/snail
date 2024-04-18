@@ -1,4 +1,6 @@
 #pragma once
+#include <fmt/ostream.h>
+
 #include <seastar/core/sstring.hh>
 #include <string>
 #include <tuple>
@@ -82,6 +84,12 @@ class Status<T> {
 
     explicit operator bool() const noexcept { return code_ == ErrCode::OK; }
 
+    friend std::ostream& operator<<(std::ostream& os, const Status<T>& s) {
+        os << "{\"code\": " << static_cast<int>(s.code_) << ", \"reason\": \""
+           << (s.reason_.empty() ? GetReason(s.code_) : s.reason_) << "\"}";
+        return os;
+    }
+
     bool OK() const { return code_ == ErrCode::OK; }
 
     void Set(ErrCode code) {
@@ -104,6 +112,11 @@ class Status<T> {
         reason_ = GetReason(code_);
     }
 
+    void Set(int code, const std::string& reason) {
+        code_ = static_cast<ErrCode>(code);
+        reason_ = reason;
+    }
+
     ErrCode Code() const { return code_; }
 
     const char* Reason() const { return reason_.c_str(); }
@@ -114,11 +127,18 @@ class Status<T> {
 
     std::string String() const {
         std::ostringstream oss;
-        oss << "{\"code\": " << static_cast<int>(code_) << ", \"message\": \""
+        oss << "{\"code\": " << static_cast<int>(code_) << ", \"reason\": \""
             << (reason_.empty() ? GetReason(code_) : reason_) << "\"}";
         return oss.str();
     }
 };
+
+#if FMT_VERSION >= 90000
+
+template <T>
+struct fmt::formatter<Status<T>> : fmt::ostream_formatter {};
+
+#endif
 
 template <>
 class Status<> {
@@ -171,6 +191,12 @@ class Status<> {
 
     explicit operator bool() const noexcept { return code_ == ErrCode::OK; }
 
+    friend std::ostream& operator<<(std::ostream& os, const Status<>& s) {
+        os << "{\"code\": " << static_cast<int>(s.code_) << ", \"reason\": \""
+           << (s.reason_.empty() ? GetReason(s.code_) : s.reason_) << "\"}";
+        return os;
+    }
+
     bool OK() const { return code_ == ErrCode::OK; }
 
     void Set(ErrCode code) {
@@ -193,16 +219,28 @@ class Status<> {
         reason_ = GetReason(code_);
     }
 
+    void Set(int code, const std::string& reason) {
+        code_ = static_cast<ErrCode>(code);
+        reason_ = reason;
+    }
+
     ErrCode Code() const { return code_; }
 
     const char* Reason() const { return reason_.c_str(); }
 
     std::string String() const {
         std::ostringstream oss;
-        oss << "{\"code\": " << static_cast<int>(code_) << ", \"message\": \""
+        oss << "{\"code\": " << static_cast<int>(code_) << ", \"reason\": \""
             << (reason_.empty() ? GetReason(code_) : reason_) << "\"}";
         return oss.str();
     }
 };
+
+#if FMT_VERSION >= 90000
+
+template <>
+struct fmt::formatter<Status<>> : fmt::ostream_formatter {};
+
+#endif
 
 }  // namespace snail
