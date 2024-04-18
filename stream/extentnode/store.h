@@ -70,7 +70,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     static seastar::future<bool> Format(std::string_view name,
                                         uint32_t cluster_id, DevType dev_type,
                                         uint32_t dev_id,
-                                        uint64_t log_cap = 64 << 20,
+                                        uint64_t log_cap = 16 << 20,
                                         uint64_t capacity = 0);
 
     Store(size_t cache_capacity = 1024) : last_sector_cache_(cache_capacity) {}
