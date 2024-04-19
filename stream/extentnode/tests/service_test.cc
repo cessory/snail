@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <random>
+#include <seastar/core/sharded.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
@@ -107,7 +108,10 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
             s = client_stream->WriteFrame(std::move(packets)).get0();
             BOOST_REQUIRE(s);
         }
-        s = service.HandleWriteExtent(req.get(), server_stream).get0();
+        s = service
+                .HandleWriteExtent(req.get(),
+                                   seastar::make_foreign(server_stream))
+                .get0();
         BOOST_REQUIRE(s);
         auto st = client_stream->ReadFrame().get0();
         BOOST_REQUIRE(st);
@@ -138,10 +142,8 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
 
         LOG_INFO("begin read i={} off={} len={}", i, read_req->off(),
                  read_req->len());
-        auto fu = service.HandleReadExtent(read_req.get(), read_server_stream)
-                      .then([read_server_stream](auto f) {
-                          return read_server_stream->Close();
-                      });
+        auto fu = service.HandleReadExtent(
+            read_req.get(), seastar::make_foreign(read_server_stream));
 
         auto st2 = read_client_stream->ReadFrame().get0();
         BOOST_REQUIRE(st2);

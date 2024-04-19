@@ -129,6 +129,16 @@ class KernelDevice : public Device {
 
 #ifdef HAS_SPDK
 
+struct SpdkDeleter final : public seastar::deleter::impl {
+    void* obj;
+    SpdkDeleter(void* obj) : impl(seastar::deleter()), obj(obj) {}
+    virtual ~SpdkDeleter() override { spdk_free(obj); }
+};
+
+static seastar::deleter make_spdk_deleter(void* obj) {
+    return seastar::deleter(new SpdkDeleter(obj));
+}
+
 class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
     struct spdk_env_opts opts_;
     struct spdk_nvme_transport_id trid_;
@@ -139,16 +149,16 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
     std::vector<struct spdk_nvme_qpair*> qpairs_;
     int qpairs_idx = 0;
 
-    seastar::reactor::poller poller_;
-
     bool attach_ = false;
     bool stop_ = false;
     size_t capacity_ = 0;
-    uint32_t sector_size_ = 512;
+    std::optional<seastar::future<>> poll_fu_;
+    seastar::condition_variable poll_cv_;
 
     struct request {
         seastar::shared_ptr<SpdkDevice> dev_ptr;
         seastar::promise<int> pr;
+        std::string reason;
     };
 
     static bool probe_cb(void* cb_ctx,
@@ -186,19 +196,32 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
         req->pr.set_value(-1);
     }
 
-    bool poll() {
-        if (stop_) {
-            return false;
-        }
+    seastar::future<> poll() {
+        while (!stop_) {
+            if (!attach_) {
+                spdk_nvme_probe_poll_async(probe_ctx_);
+            }
 
-        if (!attach_) {
-            spdk_nvme_probe_poll_async(probe_ctx_);
+            for (auto& qpair : qpairs_) {
+                spdk_nvme_qpair_process_completions(qpair, 0);
+            }
         }
+        co_return;
+    }
 
-        for (auto& qpair : qpairs_) {
-            spdk_nvme_qpair_process_completions(qpair, 0);
+    int spdk_nvme_status2errno(spdk_nvme_status_code_type code) {
+        switch (code) {
+            case SPDK_NVME_SCT_GENERIC:
+            case SPDK_NVME_SCT_COMMAND_SPECIFIC:
+            case SPDK_NVME_SCT_PATH:
+            case SPDK_NVME_SCT_VENDOR_SPECIFIC:
+                break;
+            case SPDK_NVME_SCT_MEDIA_ERROR:
+                return EIO;
+            default:
+                break;
         }
-        return true;
+        return static_cast<int>(ErrCode::ErrUnExpect);
     }
 
    public:
@@ -273,14 +296,16 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
         co_return seastar::dynamic_pointer_cast<Device, SpdkDevice>(ptr);
     }
 
-    seastar::temporary_buffer<char> Get(size_t n) {}
+    seastar::temporary_buffer<char> Get(size_t n) {
+        void* b = spdk_zmalloc(n, kMemoryAlignment, NULL,
+                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+        return seastar::temporary_buffer<char>((char*)b, n,
+                                               make_spdk_deleter(b));
+    }
 
     seastar::future<Status<>> Write(uint64_t pos, const char* b, size_t len) {
-        if ((pos % sector_size_) != 0 || (len % sector_size_) != 0) {
-            co_return Status<>(ErrCode::ErrInvalidParameter);
-        }
-
-        auto req = new SpdkDevice::request;
+        Status<> s;
+        std::unique_ptr<request> req(new request);
         req->dev_ptr = seastar::shared_from_this();
         auto res = spdk_nvme_ns_cmd_write(
             ns_, qpairs_[qpairs_idx_], b, (pos / sector_size_),
@@ -292,15 +317,14 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                     LOG_ERROR(
                         "I/O error status: {}",
                         spdk_nvme_cpl_get_status_string(&completion->status));
-                    r->pr.set_value((int)ErrCode::ErrDisk);
+                    r->pr.set_value(EIO);
                     return;
                 }
                 r->pr.set_value((int)ErrCode::OK);
             },
-            req, 0);
-        qpairs_idx = (qpairs_idx + 1) % qpairs_.size();
+            req.get(), 0);
+        qpairs_idx_ = (qpairs_idx_ + 1) % qpairs_.size();
         if (res != 0) {
-            delete req;
             if (res == ENXIO) {
                 co_return Status<>(ErrCode::ErrDisk);
             }
