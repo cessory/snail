@@ -45,7 +45,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_test) {
                                            snail::stream::DevType::HDD, 1)
                   .get0();
     BOOST_REQUIRE(ok);
-    auto store = Store::Load("/dev/sdb", DevType::HDD).get0();
+    auto store = Store::Load("/dev/sdb").get0();
     BOOST_REQUIRE(store);
 
     Status<> s;

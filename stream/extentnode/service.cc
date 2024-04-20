@@ -389,6 +389,8 @@ static seastar::future<Status<>> WriteFrames(
     co_return s;
 }
 
+seastar::future<> Service::Close() { return store_->Close(); }
+
 seastar::future<Status<>> Service::HandleReadExtent(
     const ReadExtentReq *req, seastar::foreign_ptr<net::StreamPtr> stream) {
     Status<> s;

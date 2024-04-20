@@ -13,7 +13,12 @@ namespace stream {
 
 class TcpServer {
     seastar::socket_address sa_;
+    unsigned cpu_index_;
+    std::vector<unsigned> cpuset_;
+    seastar::pollable_fd fd_;
     std::unordered_map<uint32_t, seastar::foreign_ptr<ServicePtr>> service_map_;
+    std::optional<seastar::promise<>> start_pr_;
+    std::vector<std::unordered_map<uint64_t, net::SessionPtr>> sess_mgr_;
 
     seastar::future<> HandleSession(net::SessionPtr sess);
     seastar::future<> HandleStream(net::StreamPtr stream);
@@ -21,12 +26,14 @@ class TcpServer {
                                             net::StreamPtr stream);
 
    public:
-    TcpServer(const std::string& host, uint16_t port);
+    TcpServer(const std::string& host, uint16_t port,
+              const std::set<unsigned>& cpuset);
 
-    void RegisterService(uint32_t diskid,
-                         seastar::foreign_ptr<ServicePtr> service);
+    seastar::future<> RegisterService(seastar::foreign_ptr<ServicePtr> service);
 
     seastar::future<> Start();
+
+    seastar::future<> Close();
 };
 
 }  // namespace stream

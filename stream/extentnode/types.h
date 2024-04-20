@@ -33,7 +33,7 @@ using TmpBuffer = seastar::temporary_buffer<char>;
 enum class DevType {
     HDD,
     SSD,
-    NVME_KERNEL,
+    NVME,
     NVME_SPDK,
     PMEM,
 };
@@ -96,13 +96,6 @@ struct ExtentID {
 
     uint64_t Hash() const;
 };
-
-#if FMT_VERSION >= 90000
-
-template <>
-struct fmt::formatter<ExtentID> : fmt::ostream_formatter {};
-
-#endif
 
 struct ChunkEntry {
     uint32_t index = -1;
@@ -174,6 +167,13 @@ struct ExtentEntry {
 
 }  // namespace stream
 }  // namespace snail
+
+#if FMT_VERSION >= 90000
+
+template <>
+struct fmt::formatter<snail::stream::ExtentID> : fmt::ostream_formatter {};
+
+#endif
 
 namespace std {
 template <>

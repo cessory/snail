@@ -19,7 +19,7 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
                                            snail::stream::DevType::HDD, 1)
                   .get0();
     BOOST_REQUIRE(ok);
-    auto store = Store::Load("/dev/sdb", DevType::HDD).get0();
+    auto store = Store::Load("/dev/sdb").get0();
     BOOST_REQUIRE(store);
 
     ExtentID extent_id(1, 1);
@@ -129,7 +129,7 @@ SEASTAR_THREAD_TEST_CASE(delete_test) {
                   .get0();
     BOOST_REQUIRE(ok);
 
-    auto store = Store::Load("/dev/sdb", DevType::HDD).get0();
+    auto store = Store::Load("/dev/sdb").get0();
     BOOST_REQUIRE(store);
 
     for (int i = 0; i < 1000; i++) {
@@ -153,7 +153,7 @@ SEASTAR_THREAD_TEST_CASE(small_write_test) {
                   .get0();
     BOOST_REQUIRE(ok);
 
-    auto store = Store::Load("/dev/sdb", DevType::HDD).get0();
+    auto store = Store::Load("/dev/sdb").get0();
     BOOST_REQUIRE(store);
 
     ExtentID extent_id(1, 1);
@@ -234,7 +234,7 @@ SEASTAR_THREAD_TEST_CASE(large_write_test) {
                   .get0();
     BOOST_REQUIRE(ok);
 
-    auto store = Store::Load("/dev/sdb", DevType::HDD).get0();
+    auto store = Store::Load("/dev/sdb").get0();
     BOOST_REQUIRE(store);
 
     ExtentID extent_id(1, 1);

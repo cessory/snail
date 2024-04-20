@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <queue>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
@@ -21,6 +22,7 @@ namespace net {
 class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
                    public Session {
     Option opt_;
+    uint64_t sess_id_;
     uint32_t max_receive_buffer_;
     uint32_t max_stream_buffer_;
     TcpConnectionPtr conn_;
@@ -55,6 +57,8 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
     std::array<std::queue<write_request *>, 2> write_q_;
     seastar::condition_variable w_cv_;
     seastar::timer<seastar::steady_clock_type> keepalive_timer_;
+
+    static std::atomic<uint64_t> session_id_;
 
    private:
     seastar::future<> RecvLoop();
@@ -98,6 +102,8 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
         std::unique_ptr<BufferAllocator> allocator = nullptr);
 
     virtual ~TcpSession() {}
+
+    uint64_t ID() const { return sess_id_; }
 
     seastar::future<Status<StreamPtr>> OpenStream();
 

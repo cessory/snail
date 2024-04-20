@@ -133,13 +133,6 @@ class Status<T> {
     }
 };
 
-#if FMT_VERSION >= 90000
-
-template <T>
-struct fmt::formatter<Status<T>> : fmt::ostream_formatter {};
-
-#endif
-
 template <>
 class Status<> {
     ErrCode code_;
@@ -236,11 +229,14 @@ class Status<> {
     }
 };
 
+}  // namespace snail
+
 #if FMT_VERSION >= 90000
 
+template <typename T>
+struct fmt::formatter<snail::Status<T>> : fmt::ostream_formatter {};
+
 template <>
-struct fmt::formatter<Status<>> : fmt::ostream_formatter {};
+struct fmt::formatter<snail::Status<>> : fmt::ostream_formatter {};
 
 #endif
-
-}  // namespace snail

@@ -31,15 +31,15 @@ struct BlockCacheKey {
     inline uint64_t Hash() const { return (extent_id.Hash() << 32) | offset; }
 };
 
+}  // namespace stream
+}  // namespace snail
+
 #if FMT_VERSION >= 90000
 
 template <>
-struct fmt::formatter<BlockCacheKey> : fmt::ostream_formatter {};
+struct fmt::formatter<snail::stream::BlockCacheKey> : fmt::ostream_formatter {};
 
 #endif
-
-}  // namespace stream
-}  // namespace snail
 
 namespace std {
 template <>
@@ -60,6 +60,10 @@ class Service {
    public:
     explicit Service(StorePtr store, size_t cache_capacity = 8192)
         : store_(store), block_cache_(cache_capacity) {}
+
+    uint32_t DeviceID() const { return store_->DeviceId(); }
+
+    seastar::future<> Close();
 
     seastar::future<Status<>> HandleWriteExtent(
         const WriteExtentReq *req, seastar::foreign_ptr<net::StreamPtr> stream);

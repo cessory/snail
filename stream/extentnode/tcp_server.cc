@@ -11,19 +11,73 @@
 namespace snail {
 namespace stream {
 
-TcpServer::TcpServer(const std::string& host, uint16_t port)
-    : sa_(seastar::ipv4_addr(host, port)) {}
+TcpServer::TcpServer(const std::string& host, uint16_t port,
+                     const std::set<unsigned>& cpuset)
+    : sa_(seastar::ipv4_addr(host, port)), cpu_index_(0) {
+    for (auto cpuid : cpuset) {
+        cpuset_.push_back(cpuid);
+    }
+}
+
+seastar::future<> TcpServer::RegisterService(
+    seastar::foreign_ptr<ServicePtr> service) {
+    auto it = service_map_.find(service->DeviceID());
+    if (it != service_map_.end()) {
+        LOG_ERROR("service-{} is already exist", service->DeviceID());
+        if (service.get_owner_shard() == seastar::this_shard_id()) {
+            co_await service->Close();
+        } else {
+            co_await seastar::smp::submit_to(
+                service.get_owner_shard(),
+                seastar::coroutine::lambda(
+                    [&service]() { return service->Close(); }));
+        }
+    } else {
+        service_map_[service->DeviceID()] = std::move(service);
+    }
+    co_return;
+}
 
 seastar::future<> TcpServer::Start() {
-    auto fd = seastar::engine().posix_listen(sa_);
-    for (;;) {
-        auto ar = co_await fd.accept();
-        auto conn = net::TcpConnection::make_connection(
-            std::move(std::get<0>(ar)), std::get<1>(ar));
-        net::Option opt;
-        auto sess = net::TcpSession::make_session(opt, conn, false);
-        (void)HandleSession(sess);
+    try {
+        fd_ = seastar::engine().posix_listen(sa_);
+    } catch (std::exception& e) {
+        LOG_ERROR("listen error: {}", e.what());
+        co_return;
     }
+    start_pr_ = seastar::promise<>();
+    sess_mgr_.resize(seastar::smp::count);
+    for (;;) {
+        try {
+            auto ar = co_await fd_.accept();
+            if (cpuset_.empty()) {
+                auto conn = net::TcpConnection::make_connection(
+                    std::move(std::get<0>(ar)), std::get<1>(ar));
+                net::Option opt;
+                auto sess = net::TcpSession::make_session(opt, conn, false);
+                sess_mgr_[seastar::this_shard_id()][sess->ID()] = sess;
+                (void)HandleSession(sess);
+            } else {
+                unsigned shard = cpuset_[cpu_index_ % cpuset_.size()];
+                cpu_index_++;
+                (void)seastar::smp::submit_to(
+                    shard,
+                    seastar::coroutine::lambda([this, ar = std::move(ar)]() {
+                        auto conn = net::TcpConnection::make_connection(
+                            std::move(std::get<0>(ar)), std::get<1>(ar));
+                        net::Option opt;
+                        auto sess =
+                            net::TcpSession::make_session(opt, conn, false);
+                        sess_mgr_[seastar::this_shard_id()][sess->ID()] = sess;
+                        (void)HandleSession(sess);
+                    }));
+            }
+        } catch (std::exception& e) {
+            LOG_ERROR("accept error: {}", e.what());
+            break;
+        }
+    }
+    start_pr_.value().set_value();
 }
 
 seastar::future<> TcpServer::HandleSession(net::SessionPtr sess) {
@@ -36,6 +90,7 @@ seastar::future<> TcpServer::HandleSession(net::SessionPtr sess) {
         (void)HandleStream(s.Value());
     }
     co_await sess->Close();
+    sess_mgr_[seastar::this_shard_id()].erase(sess->ID());
     co_return;
 }
 
@@ -289,6 +344,46 @@ seastar::future<Status<>> TcpServer::HandleMessage(
             break;
     }
     co_return s;
+}
+
+seastar::future<> TcpServer::Close() {
+    if (start_pr_) {
+        fd_.close();
+        co_await start_pr_.value().get_future();
+        start_pr_.reset();
+    }
+    // close all session
+    for (int i = 0; i < sess_mgr_.size(); ++i) {
+        std::unordered_map<uint64_t, net::SessionPtr> mgr =
+            std::move(sess_mgr_[i]);
+        if (i == seastar::this_shard_id()) {
+            for (auto it = mgr.begin(); it != mgr.end(); it++) {
+                co_await it->second->Close();
+            }
+        } else {
+            co_await seastar::smp::submit_to(
+                i, seastar::coroutine::lambda([&mgr]() -> seastar::future<> {
+                    for (auto it = mgr.begin(); it != mgr.end(); it++) {
+                        co_await it->second->Close();
+                    }
+                }));
+        }
+    }
+
+    // close service
+    for (auto it = service_map_.begin(); it != service_map_.end(); it++) {
+        seastar::foreign_ptr<ServicePtr> service = std::move(it->second);
+        if (service.get_owner_shard() == seastar::this_shard_id()) {
+            co_await service->Close();
+        } else {
+            co_await seastar::smp::submit_to(
+                service.get_owner_shard(),
+                seastar::coroutine::lambda([&service]() -> seastar::future<> {
+                    co_await service->Close();
+                }));
+        }
+    }
+    co_return;
 }
 
 }  // namespace stream

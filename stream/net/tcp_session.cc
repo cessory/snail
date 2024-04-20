@@ -15,6 +15,8 @@ static const size_t default_accept_backlog = 1024;
 static constexpr uint32_t kMinStreamBufferSize = 1 << 20;
 static constexpr uint32_t kMinReceiveBufferSize = 4 << 20;
 
+std::atomic<uint64_t> TcpSession::session_id_ = 1;
+
 class DefaultBufferAllocator : public BufferAllocator {
    public:
     virtual ~DefaultBufferAllocator() {}
@@ -30,6 +32,7 @@ class DefaultBufferAllocator : public BufferAllocator {
 TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
                        std::unique_ptr<BufferAllocator> allocator)
     : opt_(opt),
+      sess_id_(TcpSession::session_id_++),
       max_receive_buffer_(
           std::max(32 * opt.max_frame_size, kMinReceiveBufferSize)),
       max_stream_buffer_(

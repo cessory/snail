@@ -64,7 +64,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
 
    public:
     static seastar::future<StorePtr> Load(std::string_view name,
-                                          DevType dev_type,
+                                          bool spdk_nvme = false,
                                           size_t cache_cap = 1024);
 
     static seastar::future<bool> Format(std::string_view name,

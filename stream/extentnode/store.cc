@@ -166,22 +166,14 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
     co_return s;
 }
 
-seastar::future<StorePtr> Store::Load(std::string_view name, DevType dev_type,
+seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
                                       size_t cache_cap) {
     StorePtr store = seastar::make_lw_shared<Store>(cache_cap);
     DevicePtr dev_ptr;
-    switch (dev_type) {
-        case DevType::HDD:
-        case DevType::SSD:
-        case DevType::NVME_KERNEL:
-            dev_ptr = co_await OpenKernelDevice(name);
-            break;
-        case DevType::NVME_SPDK:
-            dev_ptr = co_await OpenSpdkDevice(name);
-            break;
-        default:
-            LOG_ERROR("invalid dev type");
-            break;
+    if (!spdk_nvme) {
+        dev_ptr = co_await OpenKernelDevice(name);
+    } else {
+        dev_ptr = co_await OpenSpdkDevice(name);
     }
     if (!dev_ptr) {
         co_return nullptr;
@@ -324,7 +316,7 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     switch (dev_type) {
         case DevType::HDD:
         case DevType::SSD:
-        case DevType::NVME_KERNEL:
+        case DevType::NVME:
             dev_ptr = co_await OpenKernelDevice(name);
             break;
         case DevType::NVME_SPDK:

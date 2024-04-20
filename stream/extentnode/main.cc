@@ -1,3 +1,5 @@
+#include <yaml-cpp/yaml.h>
+
 #include <seastar/core/app-template.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
@@ -5,10 +7,34 @@
 #include <seastar/http/httpd.hh>
 #include <seastar/http/routes.hh>
 
-#include "store.h"
+#include "tcp_server.h"
 #include "util/logger.h"
 
 namespace bpo = boost::program_options;
+using namespace snail;
+using namespace snail::stream;
+
+struct DiskConfig {
+    std::string name;
+    bool spdk_nvme = false;
+    std::optional<unsigned> cpu;
+    unsigned ns_id = 1;  // this is aviliable if spdk_nvme is true
+};
+
+struct NetConfig {
+    std::string host = "0.0.0.0";
+    uint16_t port = 9000;
+    std::set<unsigned> cpuset;
+};
+
+struct Config {
+    bool poll_mode = false;
+    std::set<unsigned> cpuset;
+    std::string log_file;
+    std::string log_level;
+    NetConfig net_cfg;
+    std::vector<DiskConfig> disks_cfg;
+};
 
 class stop_signal {
     bool _caught = false;
@@ -40,15 +66,126 @@ class stop_signal {
     bool stopping() const { return _caught; }
 };
 
+static void ParseDiskConfig(const YAML::Node& node,
+                            const std::set<unsigned>& cpuset, DiskConfig& cfg) {
+    if (node["name"]) {
+        cfg.name = node["name"].as<std::string>();
+    }
+    if (node["spdk_nvme"]) {
+        cfg.spdk_nvme = node["spdk_nvme"].as<bool>();
+    }
+    if (node["cpu"]) {
+        unsigned v = node["cpu"].as<unsigned>();
+        if (cpuset.count(v)) {
+            cfg.cpu = v;
+        }
+    }
+    if (node["ns_id"]) {
+        cfg.ns_id = node["ns_id"].as<unsigned>();
+    }
+}
+
+static void ParseNetConfig(const YAML::Node& node,
+                           const std::set<unsigned>& cpuset, NetConfig& cfg) {
+    if (node["host"]) {
+        cfg.host = node["host"].as<std::string>();
+    }
+    if (node["port"]) {
+        cfg.port = node["port"].as<uint16_t>();
+    }
+
+    auto& child = node["cpuset"];
+    if (child && child.IsSequence()) {
+        for (auto& i : child) {
+            unsigned v = i.as<unsigned>();
+            if (cpuset.count(v)) {
+                cfg.cpuset.insert(v);
+            }
+        }
+    }
+}
+
+static bool ParseConfigFile(const std::string& name, Config& cfg) {
+    YAML::Node doc = YAML::LoadFile(name);
+
+    if (doc["poll_mode"]) {
+        cfg.poll_mode = doc["poll_mode"].as<bool>();
+    }
+    if (doc["log_file"]) {
+        cfg.log_file = doc["log_file"].as<std::string>();
+    }
+    if (doc["log_level"]) {
+        cfg.log_file = doc["log_level"].as<std::string>();
+    }
+
+    if (doc["cpuset"] && doc["cpuset"].IsSequence()) {
+        for (const auto& node : doc["cpuset"]) {
+            cfg.cpuset.insert(node.as<unsigned>());
+        }
+    }
+
+    if (doc["net"] && doc["net"].IsMap()) {
+        ParseNetConfig(doc["net"], cfg.cpuset, cfg.net_cfg);
+    }
+
+    if (doc["disks"] && doc["disks"].IsSequence()) {
+        for (const auto& node : doc["disks"]) {
+            DiskConfig disk_cfg;
+            ParseDiskConfig(node, cfg.cpuset, disk_cfg);
+            if (disk_cfg.name == "") {
+                LOG_WARN("disk name is empty");
+                continue;
+            }
+            cfg.disks_cfg.push_back(disk_cfg);
+            if (disk_cfg.spdk_nvme && !cfg.poll_mode) {
+                // if we have a spdk nvme, we must set poll mode
+                cfg.poll_mode = true;
+            }
+        }
+    }
+    return true;
+}
+
+static seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> CreateService(
+    unsigned shard, const DiskConfig disk_cfg) {
+    Status<seastar::foreign_ptr<ServicePtr>> s;
+    if (shard == 0) {
+        auto store = co_await Store::Load(disk_cfg.name, disk_cfg.spdk_nvme);
+        if (!store) {
+            s.Set(ErrCode::ErrUnExpect);
+            co_return s;
+        }
+        auto service =
+            seastar::make_foreign(seastar::make_lw_shared<Service>(store));
+        s.SetValue(std::move(service));
+    } else {
+        s = co_await seastar::smp::submit_to(
+            shard,
+            [disk_cfg]()
+                -> seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> {
+                Status<seastar::foreign_ptr<ServicePtr>> s;
+                auto store =
+                    co_await Store::Load(disk_cfg.name, disk_cfg.spdk_nvme);
+                if (!store) {
+                    s.Set(ErrCode::ErrUnExpect);
+                    co_return s;
+                }
+                auto service = seastar::make_foreign(
+                    seastar::make_lw_shared<Service>(store));
+                s.SetValue(std::move(service));
+                co_return s;
+            });
+    }
+    co_return s;
+}
+
 int main(int argc, char** argv) {
     boost::program_options::options_description desc;
     desc.add_options()("help,h", "show help message");
     desc.add_options()("format", bpo::value<std::string>(), "format disk");
-    desc.add_options()("disk", bpo::value<std::string>(), "disk path");
-    desc.add_options()("cpu", bpo::value<unsigned>(), "bind cpu id");
-    desc.add_options()("port", bpo::value<uint16_t>(), "listen port");
-    desc.add_options()("logfile", bpo::value<std::string>(), "log file");
-    desc.add_options()("loglevel", bpo::value<std::string>(), "log level");
+    desc.add_options()("spdk_nvme", bpo::value<bool>(),
+                       "if spdk nvme, set true");
+    desc.add_options()("config,c", bpo::value<bool>(), "config file");
 
     bpo::variables_map vm;
     try {
@@ -66,45 +203,119 @@ int main(int argc, char** argv) {
     }
 
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%f][%l][%s:%#] %v");
-    if (vm.count("logfile")) {
-        LOG_INIT(vm["logfile"].as<std::string>(), 1073741824, 10);
+    Config cfg;
+    bool is_format = false;
+    bool spdk_nvme = false;
+    std::string format_disk;
+    if (vm.count("format")) {
+        is_format = true;
+        format_disk = vm["format"].as<std::string>();
+    }
+    if (vm.count("spdk_nvme")) {
+        spdk_nvme = vm["spdk_nvme"].as<bool>();
+    }
+    if (!is_format && vm.count("config")) {
+        try {
+            if (!ParseConfigFile(vm["config"].as<std::string>(), cfg)) {
+                return 0;
+            }
+        } catch (std::exception& e) {
+            LOG_ERROR("parse config file error: {}", e.what());
+            return 0;
+        }
     }
 
-    if (vm.count("loglevel")) {
-        LOG_SET_LEVEL(vm["loglevel"].as<std::string>());
+    if (!is_format) {
+        if (!cfg.log_file.empty()) {
+            LOG_INIT(cfg.log_file, 1073741824, 10);
+        }
+        if (!cfg.log_level.empty()) {
+            LOG_SET_LEVEL(cfg.log_level);
+        }
     }
 
     seastar::app_template::seastar_options opts;
-    opts.reactor_opts.poll_mode.set_value();
-    opts.smp_opts.smp.set_value(1);
-    if (vm.count("cpu")) {
-        opts.smp_opts.cpuset.set_value({vm["cpu"].as<unsigned>()});
+    if (cfg.poll_mode) {
+        opts.reactor_opts.poll_mode.set_value();
+    }
+    if (is_format) {
+        opts.smp_opts.smp.set_value(1);
+    } else {
+        if (!cfg.cpuset.empty()) {
+            opts.smp_opts.smp.set_value(cfg.cpuset.size());
+            opts.smp_opts.cpuset.set_value(cfg.cpuset);
+        } else {
+            opts.smp_opts.smp.set_value(1);
+        }
     }
     seastar::app_template app(std::move(opts));
     char* args[1] = {argv[0]};
     return app.run(
-        1, args, [vm = std::move(vm)]() mutable -> seastar::future<> {
-            return seastar::async([vm = std::move(vm)]() mutable {
+        1, args,
+        [is_format, format_disk, spdk_nvme, cfg]() -> seastar::future<> {
+            return seastar::async([is_format, format_disk, spdk_nvme, cfg]() {
                 stop_signal signal;
-                if (vm.count("format")) {
-                    std::string path = vm["format"].as<std::string>();
-                    auto ok = snail::stream::Store::Format(
-                                  path, 1, snail::stream::DevType::HDD, 1)
-                                  .get();
+                if (is_format) {
+                    auto ok =
+                        snail::stream::Store::Format(
+                            format_disk, 1, snail::stream::DevType::HDD, 1)
+                            .get();
                     if (!ok) {
-                        LOG_ERROR("format {} error", path);
+                        LOG_ERROR("format {} error", format_disk);
                     } else {
-                        LOG_INFO("format {} success", path);
+                        LOG_INFO("format {} success", format_disk);
                     }
                     return;
                 }
-
-                if (!vm.count("disk")) {
-                    LOG_ERROR("not found disk path");
+                TcpServer* server = nullptr;
+                try {
+                    server = new TcpServer(cfg.net_cfg.host, cfg.net_cfg.port,
+                                           cfg.net_cfg.cpuset.empty()
+                                               ? cfg.cpuset
+                                               : cfg.net_cfg.cpuset);
+                } catch (std::exception& e) {
+                    LOG_ERROR("new tcp server error: {}", e.what());
                     return;
                 }
-                std::string disk_path = vm["disk"].as<std::string>();
-                return;
+                std::set<unsigned> cpuset = cfg.cpuset;
+                std::vector<
+                    seastar::future<Status<seastar::foreign_ptr<ServicePtr>>>>
+                    fu_vec;
+                for (auto& disk_cfg : cfg.disks_cfg) {
+                    unsigned shard = 0;
+                    if (disk_cfg.cpu) {
+                        shard = disk_cfg.cpu.value();
+                    } else {
+                        std::set<unsigned>::iterator it;
+                        for (int i = 0; i < 2; i++) {
+                            it = cpuset.begin();
+                            if (it == cpuset.end()) {
+                                cpuset = cfg.cpuset;
+                                continue;
+                            }
+                            break;
+                        }
+
+                        if (it != cpuset.end()) {
+                            shard = *it;
+                            cpuset.erase(it);
+                        }
+                    }
+                    auto fu = CreateService(shard, disk_cfg);
+                    fu_vec.emplace_back(std::move(fu));
+                }
+                for (int i = 0; i < fu_vec.size(); i++) {
+                    auto s = fu_vec[i].get0();
+                    if (s) {
+                        server->RegisterService(std::move(s.Value())).get();
+                    }
+                }
+                server->Start().get();
+
+                server->Close().get();
+                delete server;
+                // engine().at_exit([server] { return server->Stop(); });
             });
         });
 }
+
