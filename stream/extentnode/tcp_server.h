@@ -13,8 +13,8 @@ namespace stream {
 
 class TcpServer {
     seastar::socket_address sa_;
-    unsigned cpu_index_;
-    std::vector<unsigned> cpuset_;
+    unsigned shard_index_;
+    std::vector<unsigned> shards_;
     seastar::pollable_fd fd_;
     std::unordered_map<uint32_t, seastar::foreign_ptr<ServicePtr>> service_map_;
     std::optional<seastar::promise<>> start_pr_;
@@ -27,7 +27,7 @@ class TcpServer {
 
    public:
     TcpServer(const std::string& host, uint16_t port,
-              const std::set<unsigned>& cpuset);
+              const std::set<unsigned>& shards);
 
     seastar::future<> RegisterService(seastar::foreign_ptr<ServicePtr> service);
 

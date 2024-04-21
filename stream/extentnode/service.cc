@@ -186,10 +186,10 @@ seastar::future<Status<>> Service::HandleWriteExtent(
     }
     auto defer = seastar::defer([extent_ptr] { extent_ptr->mu.unlock(); });
 
-    using StatusPtr =
-        seastar::lw_shared_ptr<Status<seastar::temporary_buffer<char>>>;
-    std::vector<seastar::foreign_ptr<StatusPtr>> send_status_vec;
-    std::vector<seastar::foreign_ptr<StatusPtr>> status_vec;
+    using TmpBufferPtr = std::unique_ptr<TmpBuffer>;
+    using TmpBufferForeignPtr = seastar::foreign_ptr<TmpBufferPtr>;
+    std::vector<TmpBufferForeignPtr> send_buf_vec;
+    std::vector<TmpBufferForeignPtr> foreign_buf_vec;
     std::vector<TmpBuffer>
         buffers;  // must deconstructor more early than status_vec
     std::optional<seastar::future<Status<>>> fu;
@@ -199,36 +199,42 @@ seastar::future<Status<>> Service::HandleWriteExtent(
     size_t first_block_len = kBlockDataSize - off % kBlockDataSize;
 
     while (len > 0) {
-        seastar::foreign_ptr<StatusPtr> st_ptr;
+        Status<TmpBufferForeignPtr> st;
         if (seastar::this_shard_id() == stream.get_owner_shard()) {
-            auto st = co_await stream->ReadFrame();
-            st_ptr =
-                seastar::make_foreign(seastar::make_lw_shared(std::move(st)));
+            auto st1 = co_await stream->ReadFrame();
+            st.SetValue(seastar::make_foreign(
+                std::make_unique<TmpBuffer>(std::move(st1.Value()))));
         } else {
-            st_ptr = co_await seastar::smp::submit_to(
+            st = co_await seastar::smp::submit_to(
                 stream.get_owner_shard(),
                 seastar::coroutine::lambda(
                     [sm = stream.get()]()
-                        -> seastar::future<seastar::foreign_ptr<StatusPtr>> {
-                        auto st = co_await sm->ReadFrame();
-                        co_return seastar::make_foreign(
-                            seastar::make_lw_shared(std::move(st)));
+                        -> seastar::future<Status<TmpBufferForeignPtr>> {
+                        Status<TmpBufferForeignPtr> st;
+                        auto st1 = co_await sm->ReadFrame();
+                        if (!st1) {
+                            st.Set(st1.Code(), st1.Reason());
+                        } else {
+                            st.SetValue(seastar::make_foreign(
+                                std::make_unique<TmpBuffer>(
+                                    std::move(st1.Value()))));
+                        }
+                        co_return std::move(st);
                     }));
         }
-        if (!st_ptr->OK()) {
-            s.Set(st_ptr->Code(), st_ptr->Reason());
+        if (!st) {
+            s.Set(st.Code(), st.Reason());
             LOG_ERROR(
                 "reqid={} extent_id={}-{} diskid={} read data frame error: {}",
                 reqid, extent_id.hi, extent_id.lo, diskid, s);
-            buffers.clear();
             co_return s;
         }
-        auto b = std::move(st_ptr->Value().share());
+        auto foreign_buf = std::move(st.Value());
+        auto b = foreign_buf->share();
         if (b.size() <= 4) {
             LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
                       reqid, extent_id.hi, extent_id.lo, diskid);
             s.Set(EBADMSG);
-            buffers.clear();
             co_return s;
         }
         size_t data_len = 0;
@@ -241,7 +247,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(
                 LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
                           reqid, extent_id.hi, extent_id.lo, diskid);
                 s.Set(EBADMSG);
-                buffers.clear();
                 co_return s;
             }
             data_len += n - 4;
@@ -253,7 +258,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(
                     "checksum n={}",
                     reqid, extent_id.hi, extent_id.lo, diskid, n);
                 s.Set(ErrCode::ErrInvalidChecksum);
-                buffers.clear();
                 co_return s;
             }
             p += n;
@@ -263,7 +267,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(
             LOG_ERROR("reqid={} extent_id={}-{} diskid={} invalid len", reqid,
                       extent_id.hi, extent_id.lo, diskid);
             s.Set(EBADMSG);
-            buffers.clear();
             co_return s;
         }
         len -= data_len;
@@ -274,7 +277,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(
                     s = co_await SendCommonResp(stream.get_owner_shard(),
                                                 stream.get(), reqid,
                                                 WRITE_EXTENT_RESP, s.Code());
-                    buffers.clear();
                     co_return s;
                 }
                 off += sent;
@@ -284,11 +286,11 @@ seastar::future<Status<>> Service::HandleWriteExtent(
             fu = store_->Write(extent_ptr, off, std::move(buffers));
             sent = ready;
             ready = 0;
-            send_status_vec = std::move(status_vec);
+            send_buf_vec = std::move(foreign_buf_vec);
         }
         ready += data_len;
         buffers.emplace_back(std::move(b));
-        status_vec.emplace_back(std::move(st_ptr));
+        foreign_buf_vec.emplace_back(std::move(foreign_buf));
     }
 
     if (fu) {
@@ -296,7 +298,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(
         if (!s) {
             s = co_await SendCommonResp(stream.get_owner_shard(), stream.get(),
                                         reqid, WRITE_EXTENT_RESP, s.Code());
-            buffers.clear();
             co_return s;
         }
         fu.reset();
@@ -308,7 +309,6 @@ seastar::future<Status<>> Service::HandleWriteExtent(
     }
     s = co_await SendCommonResp(stream.get_owner_shard(), stream.get(), reqid,
                                 WRITE_EXTENT_RESP, s.Code());
-    buffers.clear();
     co_return s;
 }
 
@@ -320,6 +320,8 @@ static seastar::future<Status<>> WriteFrames(
     std::vector<TmpBuffer> send_frame;
     std::vector<TmpBuffer> last_frame;
     std::vector<iovec> iov;
+
+    uint64_t total_len = 0;
     for (int i = 0; i < n; ++i) {
         TmpBuffer buf = std::move(buffers[i]);
         if (i == 0 && first && trim_front_len) {
@@ -340,6 +342,8 @@ static seastar::future<Status<>> WriteFrames(
             iov.push_back({first_block.get_write(), first_block.size() - 4});
             iov.push_back(
                 {first_block_crc.get_write(), first_block_crc.size()});
+            total_len += first_block.size() - 4;
+            total_len += first_block_crc.size();
             send_frame.emplace_back(
                 std::move(first_block.share(0, first_block.size() - 4)));
             send_frame.emplace_back(std::move(first_block_crc));
@@ -366,12 +370,14 @@ static seastar::future<Status<>> WriteFrames(
 
         if (buf.size()) {
             iov.push_back({buf.get_write(), buf.size()});
+            total_len += buf.size();
             send_frame.emplace_back(std::move(buf));
         }
 
-        for (int i = 0; i < last_frame.size(); i++) {
-            iov.push_back({last_frame[i].get_write(), last_frame[i].size()});
-            send_frame.emplace_back(std::move(last_frame[i]));
+        for (int j = 0; j < last_frame.size(); j++) {
+            iov.push_back({last_frame[j].get_write(), last_frame[j].size()});
+            total_len += last_frame[j].size();
+            send_frame.emplace_back(std::move(last_frame[j]));
         }
     }
 
@@ -382,7 +388,8 @@ static seastar::future<Status<>> WriteFrames(
             shard_id,
             seastar::coroutine::lambda(
                 [iov = std::move(iov), stream]() -> seastar::future<Status<>> {
-                    return stream->WriteFrame(std::move(iov));
+                    auto s = co_await stream->WriteFrame(std::move(iov));
+                    co_return s;
                 }));
     }
 

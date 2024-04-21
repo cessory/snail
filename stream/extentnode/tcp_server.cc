@@ -12,10 +12,13 @@ namespace snail {
 namespace stream {
 
 TcpServer::TcpServer(const std::string& host, uint16_t port,
-                     const std::set<unsigned>& cpuset)
-    : sa_(seastar::ipv4_addr(host, port)), cpu_index_(0) {
-    for (auto cpuid : cpuset) {
-        cpuset_.push_back(cpuid);
+                     const std::set<unsigned>& shards)
+    : sa_(seastar::ipv4_addr(host, port)), shard_index_(0) {
+    for (auto shard : shards) {
+        shards_.push_back(shard);
+    }
+    if (shards.empty()) {
+        shards_.push_back(0);
     }
 }
 
@@ -50,25 +53,24 @@ seastar::future<> TcpServer::Start() {
     for (;;) {
         try {
             auto ar = co_await fd_.accept();
-            if (cpuset_.empty()) {
+            unsigned shard = shards_[shard_index_++ % shards_.size()];
+            if (shard == seastar::this_shard_id()) {
                 auto conn = net::TcpConnection::make_connection(
                     std::move(std::get<0>(ar)), std::get<1>(ar));
                 net::Option opt;
                 auto sess = net::TcpSession::make_session(opt, conn, false);
-                sess_mgr_[seastar::this_shard_id()][sess->ID()] = sess;
+                sess_mgr_[shard][sess->ID()] = sess;
                 (void)HandleSession(sess);
             } else {
-                unsigned shard = cpuset_[cpu_index_ % cpuset_.size()];
-                cpu_index_++;
                 (void)seastar::smp::submit_to(
-                    shard,
-                    seastar::coroutine::lambda([this, ar = std::move(ar)]() {
+                    shard, seastar::coroutine::lambda([this, shard,
+                                                       ar = std::move(ar)]() {
                         auto conn = net::TcpConnection::make_connection(
                             std::move(std::get<0>(ar)), std::get<1>(ar));
                         net::Option opt;
                         auto sess =
                             net::TcpSession::make_session(opt, conn, false);
-                        sess_mgr_[seastar::this_shard_id()][sess->ID()] = sess;
+                        sess_mgr_[shard][sess->ID()] = sess;
                         (void)HandleSession(sess);
                     }));
             }

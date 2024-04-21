@@ -17,14 +17,14 @@ using namespace snail::stream;
 struct DiskConfig {
     std::string name;
     bool spdk_nvme = false;
-    std::optional<unsigned> cpu;
-    unsigned ns_id = 1;  // this is aviliable if spdk_nvme is true
+    unsigned shard = 0;
+    unsigned ns_id = 1;  // if spdk_nvme is true, this is aviliable
 };
 
 struct NetConfig {
     std::string host = "0.0.0.0";
     uint16_t port = 9000;
-    std::set<unsigned> cpuset;
+    std::set<unsigned> shards;
 };
 
 struct Config {
@@ -66,27 +66,22 @@ class stop_signal {
     bool stopping() const { return _caught; }
 };
 
-static void ParseDiskConfig(const YAML::Node& node,
-                            const std::set<unsigned>& cpuset, DiskConfig& cfg) {
+static void ParseDiskConfig(const YAML::Node& node, DiskConfig& cfg) {
     if (node["name"]) {
         cfg.name = node["name"].as<std::string>();
     }
     if (node["spdk_nvme"]) {
         cfg.spdk_nvme = node["spdk_nvme"].as<bool>();
     }
-    if (node["cpu"]) {
-        unsigned v = node["cpu"].as<unsigned>();
-        if (cpuset.count(v)) {
-            cfg.cpu = v;
-        }
+    if (node["shard"]) {
+        cfg.shard = node["shard"].as<unsigned>();
     }
     if (node["ns_id"]) {
         cfg.ns_id = node["ns_id"].as<unsigned>();
     }
 }
 
-static void ParseNetConfig(const YAML::Node& node,
-                           const std::set<unsigned>& cpuset, NetConfig& cfg) {
+static void ParseNetConfig(const YAML::Node& node, NetConfig& cfg) {
     if (node["host"]) {
         cfg.host = node["host"].as<std::string>();
     }
@@ -94,13 +89,10 @@ static void ParseNetConfig(const YAML::Node& node,
         cfg.port = node["port"].as<uint16_t>();
     }
 
-    auto& child = node["cpuset"];
+    auto& child = node["shards"];
     if (child && child.IsSequence()) {
         for (auto& i : child) {
-            unsigned v = i.as<unsigned>();
-            if (cpuset.count(v)) {
-                cfg.cpuset.insert(v);
-            }
+            cfg.shards.insert(i.as<unsigned>());
         }
     }
 }
@@ -124,17 +116,34 @@ static bool ParseConfigFile(const std::string& name, Config& cfg) {
         }
     }
 
+    unsigned max_thread_n =
+        std::max(static_cast<unsigned>(1), (unsigned)cfg.cpuset.size());
+
     if (doc["net"] && doc["net"].IsMap()) {
-        ParseNetConfig(doc["net"], cfg.cpuset, cfg.net_cfg);
+        ParseNetConfig(doc["net"], cfg.net_cfg);
+        auto it = cfg.net_cfg.shards.rbegin();
+        if (it != cfg.net_cfg.shards.rend() && *it >= max_thread_n) {
+            LOG_ERROR("shard id {} in net is too large", *it);
+            return false;
+        } else if (it == cfg.net_cfg.shards.rend()) {
+            for (unsigned i = 0; i < max_thread_n; i++) {
+                cfg.net_cfg.shards.insert(i);
+            }
+        }
     }
 
     if (doc["disks"] && doc["disks"].IsSequence()) {
         for (const auto& node : doc["disks"]) {
             DiskConfig disk_cfg;
-            ParseDiskConfig(node, cfg.cpuset, disk_cfg);
+            ParseDiskConfig(node, disk_cfg);
             if (disk_cfg.name == "") {
-                LOG_WARN("disk name is empty");
-                continue;
+                LOG_ERROR("disk name is empty");
+                return false;
+            }
+            if (disk_cfg.shard >= max_thread_n) {
+                LOG_ERROR("invalid shard={} in disk-{}", disk_cfg.shard,
+                          disk_cfg.name);
+                return false;
             }
             cfg.disks_cfg.push_back(disk_cfg);
             if (disk_cfg.spdk_nvme && !cfg.poll_mode) {
@@ -147,9 +156,9 @@ static bool ParseConfigFile(const std::string& name, Config& cfg) {
 }
 
 static seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> CreateService(
-    unsigned shard, const DiskConfig disk_cfg) {
+    const DiskConfig disk_cfg) {
     Status<seastar::foreign_ptr<ServicePtr>> s;
-    if (shard == 0) {
+    if (disk_cfg.shard == seastar::this_shard_id()) {
         auto store = co_await Store::Load(disk_cfg.name, disk_cfg.spdk_nvme);
         if (!store) {
             s.Set(ErrCode::ErrUnExpect);
@@ -160,7 +169,7 @@ static seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> CreateService(
         s.SetValue(std::move(service));
     } else {
         s = co_await seastar::smp::submit_to(
-            shard,
+            disk_cfg.shard,
             [disk_cfg]()
                 -> seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> {
                 Status<seastar::foreign_ptr<ServicePtr>> s;
@@ -270,38 +279,16 @@ int main(int argc, char** argv) {
                 TcpServer* server = nullptr;
                 try {
                     server = new TcpServer(cfg.net_cfg.host, cfg.net_cfg.port,
-                                           cfg.net_cfg.cpuset.empty()
-                                               ? cfg.cpuset
-                                               : cfg.net_cfg.cpuset);
+                                           cfg.net_cfg.shards);
                 } catch (std::exception& e) {
                     LOG_ERROR("new tcp server error: {}", e.what());
                     return;
                 }
-                std::set<unsigned> cpuset = cfg.cpuset;
                 std::vector<
                     seastar::future<Status<seastar::foreign_ptr<ServicePtr>>>>
                     fu_vec;
-                for (auto& disk_cfg : cfg.disks_cfg) {
-                    unsigned shard = 0;
-                    if (disk_cfg.cpu) {
-                        shard = disk_cfg.cpu.value();
-                    } else {
-                        std::set<unsigned>::iterator it;
-                        for (int i = 0; i < 2; i++) {
-                            it = cpuset.begin();
-                            if (it == cpuset.end()) {
-                                cpuset = cfg.cpuset;
-                                continue;
-                            }
-                            break;
-                        }
-
-                        if (it != cpuset.end()) {
-                            shard = *it;
-                            cpuset.erase(it);
-                        }
-                    }
-                    auto fu = CreateService(shard, disk_cfg);
+                for (const auto& disk_cfg : cfg.disks_cfg) {
+                    auto fu = CreateService(disk_cfg);
                     fu_vec.emplace_back(std::move(fu));
                 }
                 for (int i = 0; i < fu_vec.size(); i++) {
