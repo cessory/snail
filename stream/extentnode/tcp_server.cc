@@ -138,7 +138,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
 
     std::unique_ptr<google::protobuf::Message> req;
     std::unordered_map<uint32_t, seastar::foreign_ptr<ServicePtr>>::iterator it;
-    auto foreign_stream = seastar::make_foreign(stream);
+    unsigned shard = seastar::this_shard_id();
     Service* service = nullptr;
     switch (type) {
         case WRITE_EXTENT_REQ:
@@ -157,18 +157,18 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 co_return s;
             }
             service = it->second.get();
-            if (it->second.get_owner_shard() == seastar::this_shard_id()) {
+            if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleWriteExtent(
-                    (const WriteExtentReq*)req.get(),
-                    std::move(foreign_stream));
+                    (const WriteExtentReq*)req.get(), stream.get(), shard);
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const WriteExtentReq*)req.get(),
-                         &foreign_stream]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleWriteExtent(
-                                r, std::move(foreign_stream));
+                         sm = stream.get(),
+                         shard]() -> seastar::future<Status<>> {
+                            auto s = co_await service->HandleWriteExtent(r, sm,
+                                                                         shard);
                             co_return s;
                         }));
             }
@@ -191,17 +191,18 @@ seastar::future<Status<>> TcpServer::HandleMessage(
             service = it->second.get();
 
             service = it->second.get();
-            if (it->second.get_owner_shard() == seastar::this_shard_id()) {
+            if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleReadExtent(
-                    (const ReadExtentReq*)req.get(), std::move(foreign_stream));
+                    (const ReadExtentReq*)req.get(), stream.get(), shard);
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const ReadExtentReq*)req.get(),
-                         &foreign_stream]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleReadExtent(
-                                r, std::move(foreign_stream));
+                         sm = stream.get(),
+                         shard]() -> seastar::future<Status<>> {
+                            auto s = co_await service->HandleReadExtent(r, sm,
+                                                                        shard);
                             co_return s;
                         }));
             }
@@ -221,21 +222,20 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 s.Set(EEXIST);
                 co_return s;
             }
-            service = it->second.get();
 
             service = it->second.get();
-            if (it->second.get_owner_shard() == seastar::this_shard_id()) {
+            if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleCreateExtent(
-                    (const CreateExtentReq*)req.get(),
-                    std::move(foreign_stream));
+                    (const CreateExtentReq*)req.get(), stream.get(), shard);
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const CreateExtentReq*)req.get(),
-                         &foreign_stream]() -> seastar::future<Status<>> {
+                         sm = stream.get(),
+                         shard]() -> seastar::future<Status<>> {
                             auto s = co_await service->HandleCreateExtent(
-                                r, std::move(foreign_stream));
+                                r, sm, shard);
                             co_return s;
                         }));
             }
@@ -255,21 +255,20 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 s.Set(EEXIST);
                 co_return s;
             }
-            service = it->second.get();
 
             service = it->second.get();
-            if (it->second.get_owner_shard() == seastar::this_shard_id()) {
+            if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleDeleteExtent(
-                    (const DeleteExtentReq*)req.get(),
-                    std::move(foreign_stream));
+                    (const DeleteExtentReq*)req.get(), stream.get(), shard);
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const DeleteExtentReq*)req.get(),
-                         &foreign_stream]() -> seastar::future<Status<>> {
+                         sm = stream.get(),
+                         shard]() -> seastar::future<Status<>> {
                             auto s = co_await service->HandleDeleteExtent(
-                                r, std::move(foreign_stream));
+                                r, sm, shard);
                             co_return s;
                         }));
             }
@@ -289,20 +288,20 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 s.Set(EEXIST);
                 co_return s;
             }
-            service = it->second.get();
 
             service = it->second.get();
             if (it->second.get_owner_shard() == seastar::this_shard_id()) {
                 s = co_await service->HandleGetExtent(
-                    (const GetExtentReq*)req.get(), std::move(foreign_stream));
+                    (const GetExtentReq*)req.get(), stream.get(), shard);
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const GetExtentReq*)req.get(),
-                         &foreign_stream]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleGetExtent(
-                                r, std::move(foreign_stream));
+                         sm = stream.get(),
+                         shard]() -> seastar::future<Status<>> {
+                            auto s =
+                                co_await service->HandleGetExtent(r, sm, shard);
                             co_return s;
                         }));
             }
@@ -322,21 +321,20 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 s.Set(EEXIST);
                 co_return s;
             }
-            service = it->second.get();
 
             service = it->second.get();
-            if (it->second.get_owner_shard() == seastar::this_shard_id()) {
+            if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleUpdateDiskStatus(
-                    (const UpdateDiskStatusReq*)req.get(),
-                    std::move(foreign_stream));
+                    (const UpdateDiskStatusReq*)req.get(), stream.get(), shard);
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const UpdateDiskStatusReq*)req.get(),
-                         &foreign_stream]() -> seastar::future<Status<>> {
+                         sm = stream.get(),
+                         shard]() -> seastar::future<Status<>> {
                             auto s = co_await service->HandleUpdateDiskStatus(
-                                r, std::move(foreign_stream));
+                                r, sm, shard);
                             co_return s;
                         }));
             }

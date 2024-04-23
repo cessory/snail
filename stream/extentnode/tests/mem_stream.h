@@ -1,4 +1,5 @@
 #include "net/session.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace stream {
@@ -41,8 +42,9 @@ class MemStream : public net::Stream {
                 recv_q_.pop();
                 if (b.empty()) {
                     s.Set(ErrCode::ErrEOF);
+                } else {
+                    s.SetValue(std::move(b));
                 }
-                s.SetValue(std::move(b));
                 break;
             }
             if (timeout < 0) {

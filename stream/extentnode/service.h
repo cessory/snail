@@ -65,26 +65,28 @@ class Service {
 
     seastar::future<> Close();
 
-    seastar::future<Status<>> HandleWriteExtent(
-        const WriteExtentReq *req, seastar::foreign_ptr<net::StreamPtr> stream);
+    seastar::future<Status<>> HandleWriteExtent(const WriteExtentReq *req,
+                                                net::Stream *stream,
+                                                unsigned shard);
 
-    seastar::future<Status<>> HandleReadExtent(
-        const ReadExtentReq *req, seastar::foreign_ptr<net::StreamPtr> stream);
+    seastar::future<Status<>> HandleReadExtent(const ReadExtentReq *req,
+                                               net::Stream *stream,
+                                               unsigned shard);
 
-    seastar::future<Status<>> HandleCreateExtent(
-        const CreateExtentReq *req,
-        seastar::foreign_ptr<net::StreamPtr> stream);
+    seastar::future<Status<>> HandleCreateExtent(const CreateExtentReq *req,
+                                                 net::Stream *stream,
+                                                 unsigned shard);
 
-    seastar::future<Status<>> HandleDeleteExtent(
-        const DeleteExtentReq *req,
-        seastar::foreign_ptr<net::StreamPtr> stream);
+    seastar::future<Status<>> HandleDeleteExtent(const DeleteExtentReq *req,
+                                                 net::Stream *stream,
+                                                 unsigned shard);
 
-    seastar::future<Status<>> HandleGetExtent(
-        const GetExtentReq *req, seastar::foreign_ptr<net::StreamPtr> s);
+    seastar::future<Status<>> HandleGetExtent(const GetExtentReq *req,
+                                              net::Stream *stream,
+                                              unsigned shard);
 
     seastar::future<Status<>> HandleUpdateDiskStatus(
-        const UpdateDiskStatusReq *req,
-        seastar::foreign_ptr<net::StreamPtr> stream);
+        const UpdateDiskStatusReq *req, net::Stream *stream, unsigned shard);
 };
 
 using ServicePtr = seastar::lw_shared_ptr<Service>;
