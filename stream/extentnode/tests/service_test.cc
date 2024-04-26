@@ -443,5 +443,47 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
     store->Close().get();
 }
 
+SEASTAR_THREAD_TEST_CASE(handle_create_test) {
+    auto ok = snail::stream::Store::Format("/dev/sdb", 1,
+                                           snail::stream::DevType::HDD, 1)
+                  .get0();
+    BOOST_REQUIRE(ok);
+    auto store = Store::Load("/dev/sdb").get0();
+    BOOST_REQUIRE(store);
+
+    Status<> s;
+    Service service(store);
+    auto pair_streams = MemStream::make_stream_pair();
+    net::StreamPtr client_stream = pair_streams.first;
+    net::StreamPtr server_stream = pair_streams.second;
+
+    ExtentID extent_id(1, 1);
+    char str_extent_id[16];
+    net::BigEndian::PutUint64(&str_extent_id[0], extent_id.hi);
+    net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
+
+    std::unique_ptr<CreateExtentReq> req(new CreateExtentReq);
+    req->mutable_base()->set_reqid("123456");
+    req->set_diskid(1);
+    req->set_extent_id(std::string(str_extent_id, 16));
+
+    s = service
+            .HandleCreateExtent(req.get(), server_stream.get(),
+                                seastar::this_shard_id())
+            .get0();
+    BOOST_REQUIRE(s);
+    auto st = client_stream->ReadFrame().get();
+    BOOST_REQUIRE(st);
+
+    TmpBuffer resp_buf = std::move(st.Value());
+    std::unique_ptr<CommonResp> resp(new CommonResp);
+    ExtentnodeMsgType type;
+    BOOST_REQUIRE(
+        ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type));
+    BOOST_REQUIRE(type == ExtentnodeMsgType::CREATE_EXTENT_RESP);
+    BOOST_REQUIRE(resp->code() == static_cast<int>(ErrCode::OK));
+    service.Close().get();
+}
+
 }  // namespace stream
 }  // namespace snail
