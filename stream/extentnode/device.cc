@@ -152,8 +152,7 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
     bool attach_ = false;
     bool stop_ = false;
     size_t capacity_ = 0;
-    std::optional<seastar::future<>> poll_fu_;
-    seastar::condition_variable poll_cv_;
+    seastar::reactor::poller poller_;
 
     struct request {
         seastar::shared_ptr<SpdkDevice> dev_ptr;
@@ -192,11 +191,12 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                     return;
                 }
         }
-
+        LOG_WARN("device {} ns {} is not found", trid->traddr,
+                 req->dev_ptr->ns_id_);
         req->pr.set_value(-1);
     }
 
-    seastar::future<> poll() {
+    bool poll() {
         while (!stop_) {
             if (!attach_) {
                 spdk_nvme_probe_poll_async(probe_ctx_);
@@ -206,7 +206,7 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                 spdk_nvme_qpair_process_completions(qpair, 0);
             }
         }
-        co_return;
+        return true;
     }
 
     int spdk_nvme_status2errno(spdk_nvme_status_code_type code) {
@@ -230,7 +230,7 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
         if (qpair_n == 0 || qpair_n > 16) {
             qpair_n == 16;
         }
-        seastar::shared_ptr<SpdkDevice> ptr =
+        seastar::shared_ptr<SpdkDevice> dev_ptr =
             seastar::make_shared<SpdkDevice>();
         spdk_nvme_trid_populate_transport(&ptr->trid_,
                                           SPDK_NVME_TRANSPORT_PCIE);
@@ -239,35 +239,35 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
             co_return nullptr;
         }
 
-        SpdkDevice::request* req = new SpdkDevice::request;
-        req->dev_ptr = ptr;
-        ptr->probe_ctx_ =
+        std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
+        req->dev_ptr = dev_ptr;
+        dev_ptr->probe_ctx_ =
             spdk_nvme_probe_async(&ptr->trid_, req, SpdkDevice::probe_cb,
                                   SpdkDevice::attach_cb, NULL);
 
         ptr->poller_ =
-            seastar::reactor::poller::simple([ptr]() { ptr->poll(); });
+            seastar::reactor::poller::simple([dev_ptr]() { dev_ptr->poll(); });
         auto res = co_await req->pr.get_future();
-        delete req;
         if (res == -1) {
-            ptr->stop_ = true;
+            dev_ptr->stop_ = true;
             co_return nullptr
         }
 
         for (uint32_t i = 0; i < qpair_n; i++) {
             auto qpair = spdk_nvme_ctrlr_alloc_io_qpair(ptr->ctrlr_, NULL, 0);
             if (qpair == NULL) {
-                ptr->stop_ = true;
+                dev_ptr->stop_ = true;
                 co_return nullptr
             }
-            ptr->qpairs_.push_back(qpair);
+            dev_ptr->qpairs_.push_back(qpair);
         }
 
-        if (spdk_nvme_ns_get_csi(ptr->ns_) == SPDK_NVME_CSI_ZNS) {
-            req = new SpdkDevice::request;
-            req->dev_ptr = ptr;
+        if (spdk_nvme_ns_get_csi(dev_ptr->ns_) == SPDK_NVME_CSI_ZNS) {
+            std::unique_ptr<SpdkDevice::request> ns_req(
+                new SpdkDevice::request);
+            ns_req->dev_ptr = ptr;
             if (spdk_nvme_zns_reset_zone(
-                    ptr->ns_, ptr->qpairs_[0], 0, false,
+                    dev_ptr->ns_, dev_ptr->qpairs_[0], 0, false,
                     [](void* arg, const struct spdk_nvme_cpl* completion) {
                         SpdkDevice::request* r =
                             reinterpret_cast<SpdkDevice::request*>(arg);
@@ -280,20 +280,18 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                         }
                         r->pr.set_value(0);
                     },
-                    req)) {
-                delete req;
+                    ns_req.get())) {
                 ptr->stop_ = true;
                 co_return nullptr
             }
-            auto res = co_await req->pr.get_future();
-            delete req;
+            auto res = co_await ns_req->pr.get_future();
             if (res == -1) {
-                ptr->stop_ = true;
+                dev_ptr->stop_ = true;
                 co_return nullptr
             }
         }
 
-        co_return seastar::dynamic_pointer_cast<Device, SpdkDevice>(ptr);
+        co_return seastar::dynamic_pointer_cast<Device, SpdkDevice>(dev_ptr);
     }
 
     seastar::temporary_buffer<char> Get(size_t n) {
@@ -336,34 +334,39 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
     }
 
     seastar::future<Status<>> Write(uint64_t pos, std::vector<iovec> iov) {
+        Status<> s;
         if ((pos % sector_size_) != 0) {
-            co_return Status<>(ErrCode::ErrInvalidParameter);
+            s.Set(EINVAL);
+            co_return s;
         }
 
         size_t len = 0;
         for (int i = 0; i < iov.size(); i++) {
             if (((uint64_t)iov[i].iov_base % kMemoryAlignment) != 0 ||
                 (iov[i].iov_len % sector_size_) != 0) {
-                co_return Status<>(ErrCode::ErrInvalidParameter);
+                s.Set(EINVAL);
+                co_return s;
             }
             len += iov[i].iov_len;
         }
 
-        auto req = new SpdkDevice::request;
+        std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
         req->dev_ptr = seastar::shared_from_this();
 
         auto res = spdk_nvme_ns_cmd_writev(
             ns_, qpairs_[qpairs_idx], (pos / sector_size_),
             (len / sector_size_),
-            [](void* ctx, const struct spdk_nvme_cpl* cpl) {}, req, 0,
+            [](void* ctx, const struct spdk_nvme_cpl* cpl) {}, req.get(), 0,
             [](void* cb_arg, uint32_t offset) {},
             [](void* cb_arg, void** address, uint32_t* length) {});
         if (res != 0) {
-            delete req;
-            if (res == ENXIO) {
-                co_return Status<>(ErrCode::ErrDisk);
+            if (res == -ENXIO) {
+                s.Set(EIO);
+            } else {
+                s.Set(-res);
             }
-            co_return Status<>(ErrCode::ErrSystem, strerror(res));
+            LOG_ERROR("spdk nvme writev error: {}", s);
+            co_return s;
         }
     }
 
