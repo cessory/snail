@@ -1,7 +1,13 @@
 #include "device.h"
 
+#include <spdk/nvme.h>
+#include <spdk/nvme_spec.h>
+#include <spdk/nvme_zns.h>
+
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/file.hh>
+#include <seastar/core/gate.hh>
+#include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/when_all.hh>
 
@@ -15,6 +21,7 @@ class KernelDevice : public Device {
     std::string name_;
     seastar::file fp_;
     size_t capacity_;
+    seastar::gate gate_;
 
    public:
     KernelDevice() {}
@@ -53,6 +60,11 @@ class KernelDevice : public Device {
     seastar::future<Status<>> Write(uint64_t pos, const char* b,
                                     size_t len) override {
         Status<> s;
+        if (gate_.is_closed()) {
+            s.Set(ENODEV);
+            co_return s;
+        }
+        seastar::gate::holder(gate_);
         try {
             auto n = co_await fp_.dma_write(pos, b, len);
             if (n != len) {
@@ -70,6 +82,11 @@ class KernelDevice : public Device {
                                     std::vector<iovec> iov) override {
         Status<> s;
         std::vector<seastar::future<size_t>> fu_vec;
+        if (gate_.is_closed()) {
+            s.Set(ENODEV);
+            co_return s;
+        }
+        seastar::gate::holder(gate_);
         try {
             int n = iov.size();
             for (int i = 0; i < n; i++) {
@@ -99,6 +116,11 @@ class KernelDevice : public Device {
                                          size_t len) override {
         Status<size_t> s;
         s.SetValue(0);
+        if (gate_.is_closed()) {
+            s.Set(ENODEV);
+            co_return s;
+        }
+        seastar::gate::holder(gate_);
         try {
             size_t n = co_await fp_.dma_read<char>(pos, b, len);
             s.SetValue(n);
@@ -110,21 +132,13 @@ class KernelDevice : public Device {
         co_return s;
     }
 
-    seastar::future<Status<size_t>> Read(uint64_t pos,
-                                         std::vector<iovec> iov) override {
-        Status<size_t> s;
-        try {
-            size_t n = co_await fp_.dma_read(pos, iov);
-            s.SetValue(n);
-        } catch (std::system_error& e) {
-            s.Set(e.code().value());
-        } catch (std::exception& e) {
-            s.Set(ErrCode::ErrUnExpect, e.what());
+    seastar::future<> Close() override {
+        if (!gate_.is_closed()) {
+            co_await gate_.close();
+            co_await fp_.close();
         }
-        co_return s;
+        co_return;
     }
-
-    seastar::future<> Close() override { return fp_.close(); }
 };
 
 #ifdef HAS_SPDK
@@ -139,92 +153,88 @@ static seastar::deleter make_spdk_deleter(void* obj) {
     return seastar::deleter(new SpdkDeleter(obj));
 }
 
-class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
+class SpdkDevice : public Device {
     struct spdk_env_opts opts_;
     struct spdk_nvme_transport_id trid_;
+    std::string name_;
     uint32_t ns_id_ = 0;
     struct spdk_nvme_probe_ctx* probe_ctx_ = nullptr;
     struct spdk_nvme_ctrlr* ctrlr_ = nullptr;
     struct spdk_nvme_ns* ns_ = nullptr;
     std::vector<struct spdk_nvme_qpair*> qpairs_;
-    int qpairs_idx = 0;
+    int qpairs_idx_ = 0;
 
     bool attach_ = false;
-    bool stop_ = false;
+    struct spdk_nvme_detach_ctx* detach_ctx_ = nullptr;
+    std::optional<seastar::promise<>> detach_pr_;
     size_t capacity_ = 0;
-    seastar::reactor::poller poller_;
+    seastar::gate gate_;
+    std::optional<seastar::reactor::poller> poller_;
 
     struct request {
-        seastar::shared_ptr<SpdkDevice> dev_ptr;
+        SpdkDevice* dev_ptr;
         seastar::promise<int> pr;
         std::string reason;
     };
 
     static bool probe_cb(void* cb_ctx,
                          const struct spdk_nvme_transport_id* trid,
-                         struct spdk_nvme_ctrlr_opts* opts) {}
+                         struct spdk_nvme_ctrlr_opts* opts) {
+        return true;
+    }
 
-    static bool attach_cb(void* cb_ctx,
+    static void attach_cb(void* cb_ctx,
                           const struct spdk_nvme_transport_id* trid,
                           struct spdk_nvme_ctrlr* ctrlr,
-                          struct spdk_nvme_ctrlr_opts* opts) {
+                          const struct spdk_nvme_ctrlr_opts* opts) {
         SpdkDevice::request* req =
             reinterpret_cast<SpdkDevice::request*>(cb_ctx);
         req->dev_ptr->attach_ = true;
         for (auto nsid = spdk_nvme_ctrlr_get_first_active_ns(ctrlr); nsid != 0;
              nsid = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
-            if nsid
-                == req->dev_ptr->ns_id_ {
-                    auto ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
-                    if (!spdk_nvme_ns_is_active(ns)) {
-                        LOG_ERROR("device {} ns: {} is not active",
-                                  trid->traddr, nsid)
-                        req->pr.set_value(-1);
-                        return
-                    }
-                    req->dev_ptr->ctrlr_ = ctrlr;
-                    req->dev_ptr->ns_ = ns;
-                    req->dev_ptr->capacity_ = spdk_nvme_ns_get_size(ns);
-                    req->dev_ptr->sector_size_ =
-                        spdk_nvme_ns_get_sector_size(ns);
-                    req->pr.set_value(0);
+            if (nsid == req->dev_ptr->ns_id_) {
+                auto ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+                if (!spdk_nvme_ns_is_active(ns)) {
+                    LOG_ERROR("device {} ns: {} is not active", trid->traddr,
+                              nsid);
+                    req->pr.set_value(-1);
                     return;
                 }
+                req->dev_ptr->ctrlr_ = ctrlr;
+                req->dev_ptr->ns_ = ns;
+                req->dev_ptr->capacity_ = spdk_nvme_ns_get_size(ns);
+                req->pr.set_value(0);
+                return;
+            }
         }
         LOG_WARN("device {} ns {} is not found", trid->traddr,
                  req->dev_ptr->ns_id_);
         req->pr.set_value(-1);
+        return;
     }
 
     bool poll() {
-        while (!stop_) {
-            if (!attach_) {
-                spdk_nvme_probe_poll_async(probe_ctx_);
-            }
+        if (!attach_ && probe_ctx_ &&
+            spdk_nvme_probe_poll_async(probe_ctx_) == 0) {
+            probe_ctx_ = nullptr;
+        }
 
-            for (auto& qpair : qpairs_) {
-                spdk_nvme_qpair_process_completions(qpair, 0);
-            }
+        for (auto& qpair : qpairs_) {
+            spdk_nvme_qpair_process_completions(qpair, 0);
+        }
+
+        if (detach_ctx_ && detach_pr_ &&
+            spdk_nvme_detach_poll_async(detach_ctx_) == 0) {
+            detach_ctx_ = nullptr;
+            detach_pr_.value().set_value();
         }
         return true;
     }
 
-    int spdk_nvme_status2errno(spdk_nvme_status_code_type code) {
-        switch (code) {
-            case SPDK_NVME_SCT_GENERIC:
-            case SPDK_NVME_SCT_COMMAND_SPECIFIC:
-            case SPDK_NVME_SCT_PATH:
-            case SPDK_NVME_SCT_VENDOR_SPECIFIC:
-                break;
-            case SPDK_NVME_SCT_MEDIA_ERROR:
-                return EIO;
-            default:
-                break;
-        }
-        return static_cast<int>(ErrCode::ErrUnExpect);
-    }
-
    public:
+    SpdkDevice() {}
+    virtual ~SpdkDevice() {}
+
     static seastar::future<DevicePtr> Open(const std::string_view name,
                                            uint32_t ns_id, uint32_t qpair_n) {
         if (qpair_n == 0 || qpair_n > 16) {
@@ -232,32 +242,35 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
         }
         seastar::shared_ptr<SpdkDevice> dev_ptr =
             seastar::make_shared<SpdkDevice>();
-        spdk_nvme_trid_populate_transport(&ptr->trid_,
+        spdk_nvme_trid_populate_transport(&dev_ptr->trid_,
                                           SPDK_NVME_TRANSPORT_PCIE);
-        if (0 != spdk_nvme_transport_id_parse(&ptr->trid_, name.c_str())) {
+        if (0 != spdk_nvme_transport_id_parse(&dev_ptr->trid_, name.data())) {
             LOG_ERROR("error parsing transport address");
             co_return nullptr;
         }
+        dev_ptr->name_ = name;
 
         std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
-        req->dev_ptr = dev_ptr;
-        dev_ptr->probe_ctx_ =
-            spdk_nvme_probe_async(&ptr->trid_, req, SpdkDevice::probe_cb,
-                                  SpdkDevice::attach_cb, NULL);
+        req->dev_ptr = dev_ptr.get();
+        dev_ptr->probe_ctx_ = spdk_nvme_probe_async(
+            &dev_ptr->trid_, req.get(), SpdkDevice::probe_cb,
+            SpdkDevice::attach_cb, NULL);
 
-        ptr->poller_ =
-            seastar::reactor::poller::simple([dev_ptr]() { dev_ptr->poll(); });
+        dev_ptr->poller_ = seastar::reactor::poller::simple(
+            [ptr = dev_ptr.get()]() -> bool { return ptr->poll(); });
+
         auto res = co_await req->pr.get_future();
         if (res == -1) {
-            dev_ptr->stop_ = true;
-            co_return nullptr
+            co_return nullptr;
         }
 
         for (uint32_t i = 0; i < qpair_n; i++) {
-            auto qpair = spdk_nvme_ctrlr_alloc_io_qpair(ptr->ctrlr_, NULL, 0);
+            auto qpair =
+                spdk_nvme_ctrlr_alloc_io_qpair(dev_ptr->ctrlr_, NULL, 0);
             if (qpair == NULL) {
-                dev_ptr->stop_ = true;
-                co_return nullptr
+                LOG_ERROR("failed to alloc io qpair, i={}", i);
+                co_await dev_ptr->Close();
+                co_return nullptr;
             }
             dev_ptr->qpairs_.push_back(qpair);
         }
@@ -265,7 +278,7 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
         if (spdk_nvme_ns_get_csi(dev_ptr->ns_) == SPDK_NVME_CSI_ZNS) {
             std::unique_ptr<SpdkDevice::request> ns_req(
                 new SpdkDevice::request);
-            ns_req->dev_ptr = ptr;
+            ns_req->dev_ptr = dev_ptr.get();
             if (spdk_nvme_zns_reset_zone(
                     dev_ptr->ns_, dev_ptr->qpairs_[0], 0, false,
                     [](void* arg, const struct spdk_nvme_cpl* completion) {
@@ -276,23 +289,25 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
                                       spdk_nvme_cpl_get_status_string(
                                           &completion->status));
                             r->pr.set_value(-1);
-                            return
+                            return;
                         }
                         r->pr.set_value(0);
                     },
                     ns_req.get())) {
-                ptr->stop_ = true;
-                co_return nullptr
+                co_await dev_ptr->Close();
+                co_return nullptr;
             }
             auto res = co_await ns_req->pr.get_future();
             if (res == -1) {
-                dev_ptr->stop_ = true;
-                co_return nullptr
+                co_await dev_ptr->Close();
+                co_return nullptr;
             }
         }
 
         co_return seastar::dynamic_pointer_cast<Device, SpdkDevice>(dev_ptr);
     }
+
+    const std::string& Name() const { return name_; }
 
     seastar::temporary_buffer<char> Get(size_t n) {
         void* b = spdk_zmalloc(n, kMemoryAlignment, NULL,
@@ -303,11 +318,22 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
 
     seastar::future<Status<>> Write(uint64_t pos, const char* b, size_t len) {
         Status<> s;
+        if (gate_.is_closed()) {
+            s.Set(ENODEV);
+            co_return s;
+        }
+        seastar::gate::holder holder(gate_);
         std::unique_ptr<request> req(new request);
-        req->dev_ptr = seastar::shared_from_this();
+        req->dev_ptr = this;
+        if ((reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask) ||
+            (len & kSectorSizeMask) ||
+            (reinterpret_cast<uintptr_t>(pos) & kSectorSizeMask)) {
+            s.Set(EINVAL);
+            co_return s;
+        }
         auto res = spdk_nvme_ns_cmd_write(
-            ns_, qpairs_[qpairs_idx_], b, (pos / sector_size_),
-            len / sector_size_,
+            ns_, qpairs_[qpairs_idx_], (void*)b, (pos / kSectorSize),
+            len / kSectorSize,
             [](void* arg, const struct spdk_nvme_cpl* completion) {
                 SpdkDevice::request* r =
                     reinterpret_cast<SpdkDevice::request*>(arg);
@@ -323,59 +349,144 @@ class SpdkDevice : public Device, public enable_shared_from_this<SpdkDevice> {
             req.get(), 0);
         qpairs_idx_ = (qpairs_idx_ + 1) % qpairs_.size();
         if (res != 0) {
-            if (res == ENXIO) {
-                co_return Status<>(ErrCode::ErrDisk);
-            }
-            co_return Status<>(ErrCode::ErrSystem, strerror(res));
+            s.Set(-res);
+            co_return s;
         }
 
         auto code = co_await req->pr.get_future();
-        return Status<>((ErrCode)code);
+        s.Set(code);
+        co_return s;
     }
 
     seastar::future<Status<>> Write(uint64_t pos, std::vector<iovec> iov) {
         Status<> s;
-        if ((pos % sector_size_) != 0) {
+        if (gate_.is_closed()) {
+            s.Set(ENODEV);
+            co_return s;
+        }
+        seastar::gate::holder holder(gate_);
+        if (pos & kSectorSizeMask) {
             s.Set(EINVAL);
             co_return s;
         }
 
-        size_t len = 0;
+        std::vector<std::unique_ptr<SpdkDevice::request>> req_vec;
+        std::vector<seastar::future<int>> fu_vec;
+
         for (int i = 0; i < iov.size(); i++) {
-            if (((uint64_t)iov[i].iov_base % kMemoryAlignment) != 0 ||
-                (iov[i].iov_len % sector_size_) != 0) {
+            if (((uint64_t)iov[i].iov_base & kMemoryAlignmentMask) ||
+                (iov[i].iov_len & kSectorSizeMask)) {
                 s.Set(EINVAL);
-                co_return s;
+                break;
             }
-            len += iov[i].iov_len;
-        }
-
-        std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
-        req->dev_ptr = seastar::shared_from_this();
-
-        auto res = spdk_nvme_ns_cmd_writev(
-            ns_, qpairs_[qpairs_idx], (pos / sector_size_),
-            (len / sector_size_),
-            [](void* ctx, const struct spdk_nvme_cpl* cpl) {}, req.get(), 0,
-            [](void* cb_arg, uint32_t offset) {},
-            [](void* cb_arg, void** address, uint32_t* length) {});
-        if (res != 0) {
-            if (res == -ENXIO) {
-                s.Set(EIO);
-            } else {
-                s.Set(-res);
+            std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
+            req->dev_ptr = this;
+            auto res = spdk_nvme_ns_cmd_write(
+                ns_, qpairs_[qpairs_idx_], iov[i].iov_base, (pos / kSectorSize),
+                iov[i].iov_len / kSectorSize,
+                [](void* arg, const struct spdk_nvme_cpl* cpl) {
+                    SpdkDevice::request* r =
+                        reinterpret_cast<SpdkDevice::request*>(arg);
+                    if (spdk_nvme_cpl_is_error(cpl)) {
+                        LOG_ERROR(
+                            "I/O error status: {}",
+                            spdk_nvme_cpl_get_status_string(&cpl->status));
+                        r->pr.set_value(EIO);
+                        return;
+                    }
+                    r->pr.set_value((int)ErrCode::OK);
+                },
+                req.get(), 0);
+            if (res != 0) {
+                if (res == -ENXIO) {
+                    s.Set(EIO);
+                } else {
+                    s.Set(-res);
+                }
+                LOG_ERROR("spdk nvme writev error: {}", s);
+                break;
             }
-            LOG_ERROR("spdk nvme writev error: {}", s);
-            co_return s;
+            fu_vec.emplace_back(std::move(req->pr.get_future()));
+            req_vec.emplace_back(std::move(req));
+            pos += iov[i].iov_len;
         }
+        qpairs_idx_ = (qpairs_idx_ + 1) % qpairs_.size();
+
+        if (!fu_vec.empty()) {
+            auto results = co_await seastar::when_all_succeed(fu_vec.begin(),
+                                                              fu_vec.end());
+            for (int i = 0; i < results.size(); i++) {
+                if (results[i] && !s) {
+                    s.Set(results[i]);
+                    break;
+                }
+            }
+        }
+        co_return s;
     }
 
-    seastar::future<Status<size_t>> Read(uint64_t pos, char* b, size_t len) = 0;
+    seastar::future<Status<size_t>> Read(uint64_t pos, char* b, size_t len) {
+        Status<size_t> s;
+        if (gate_.is_closed()) {
+            s.Set(ENODEV);
+            co_return s;
+        }
+        seastar::gate::holder holder(gate_);
+        if ((pos & kSectorSizeMask) ||
+            (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask) ||
+            (len & kSectorSizeMask)) {
+            s.Set(EINVAL);
+            co_return s;
+        }
+        std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
+        req->dev_ptr = this;
+        auto res = spdk_nvme_ns_cmd_read(
+            ns_, qpairs_[qpairs_idx_], b, pos / kSectorSize, len / kSectorSize,
+            [](void* arg, const struct spdk_nvme_cpl* cpl) {
+                SpdkDevice::request* r =
+                    reinterpret_cast<SpdkDevice::request*>(arg);
+                if (spdk_nvme_cpl_is_error(cpl)) {
+                    LOG_ERROR("I/O error status: {}",
+                              spdk_nvme_cpl_get_status_string(&cpl->status));
+                    r->pr.set_value(EIO);
+                    return;
+                }
+                r->pr.set_value((int)ErrCode::OK);
+            },
+            req.get(), 0);
+        qpairs_idx_ = (qpairs_idx_ + 1) % qpairs_.size();
+        if (res != 0) {
+            s.Set(-res);
+            LOG_ERROR("spdk nvme read error: {}", s);
+            co_return s;
+        }
 
-    seastar::future<Status<size_t>> Read(uint64_t pos,
-                                         std::vector<iovec> iov) = 0;
+        auto code = co_await req->pr.get_future();
+        s.Set(code);
+        if (s) {
+            s.SetValue(len);
+        }
+        co_return s;
+    }
 
-    seastar::future<> Close() = 0;
+    seastar::future<> Close() {
+        if (!gate_.is_closed()) {
+            co_await gate_.close();
+            for (int i = 0; i < qpairs_.size(); ++i) {
+                spdk_nvme_ctrlr_free_io_qpair(qpairs_[i]);
+            }
+            qpairs_.clear();
+            if (ctrlr_) {
+                spdk_nvme_detach_async(ctrlr_, &detach_ctx_);
+                if (detach_ctx_) {
+                    detach_pr_ = seastar::promise<>();
+                    co_await detach_pr_.value().get_future();
+                    detach_pr_.reset();
+                }
+            }
+        }
+        co_return;
+    }
 
     size_t Capacity() const { return capacity_; }
 };
@@ -392,8 +503,15 @@ seastar::future<DevicePtr> OpenKernelDevice(const std::string_view name) {
     co_return ptr;
 }
 
-seastar::future<DevicePtr> OpenSpdkDevice(const std::string_view name) {
+seastar::future<DevicePtr> OpenSpdkDevice(const std::string_view name,
+                                          uint32_t ns_id, uint32_t qpair_n) {
+#if HAS_SPDK
+    auto ptr = co_await SpdkDevice::Open(name, ns_id, qpair_n);
+    co_return ptr;
+#else
+    LOG_ERROR("not support spdk device");
     co_return nullptr;
+#endif
 }
 
 }  // namespace stream

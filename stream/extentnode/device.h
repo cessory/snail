@@ -29,9 +29,6 @@ class Device {
     virtual seastar::future<Status<size_t>> Read(uint64_t pos, char* b,
                                                  size_t len) = 0;
 
-    virtual seastar::future<Status<size_t>> Read(uint64_t pos,
-                                                 std::vector<iovec> iov) = 0;
-
     virtual seastar::future<> Close() = 0;
 };
 
@@ -39,7 +36,9 @@ using DevicePtr = seastar::shared_ptr<Device>;
 
 seastar::future<DevicePtr> OpenKernelDevice(const std::string_view name);
 
-seastar::future<DevicePtr> OpenSpdkDevice(const std::string_view name);
+seastar::future<DevicePtr> OpenSpdkDevice(const std::string_view name,
+                                          uint32_t ns_id = 0,
+                                          uint32_t qpair_n = 8);
 
 }  // namespace stream
 }  // namespace snail
