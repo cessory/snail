@@ -28,7 +28,7 @@ FOREACH(proto_file ${proto_files})
 ENDFOREACH(proto_file)
 
 include_directories(${PROJECT_SOURCE_DIR})
-add_definitions(-DSPDLOG_FMT_EXTERNAL)
+add_definitions(-DSPDLOG_FMT_EXTERNAL -DHAS_SPDK)
 
 add_library(UTIL_OBJS OBJECT ${util_srcs})
 target_link_libraries(UTIL_OBJS Seastar::seastar)
