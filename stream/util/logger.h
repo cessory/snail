@@ -8,6 +8,38 @@
 #define SPDLOG_HEADER_ONLY 1
 #endif
 
+#ifdef LOG_INIT
+#undef LOG_INIT
+#endif
+
+#ifdef LOG_SET_LEVEL
+#undef LOG_SET_LEVEL
+#endif
+
+#ifdef LOG_TRACE
+#undef LOG_TRACE
+#endif
+
+#ifdef LOG_DEBUG
+#undef LOG_DEBUG
+#endif
+
+#ifdef LOG_INFO
+#undef LOG_INFO
+#endif
+
+#ifdef LOG_WARN
+#undef LOG_WARN
+#endif
+
+#ifdef LOG_ERROR
+#undef LOG_ERROR
+#endif
+
+#ifdef LOG_FATAL
+#undef LOG_FATAL
+#endif
+
 #define LOG_INIT(filename, max_file_size, max_files)       \
     spdlog::set_default_logger(spdlog::rotating_logger_mt( \
         "rotating log", filename, max_file_size, max_files))
