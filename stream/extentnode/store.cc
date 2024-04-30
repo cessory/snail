@@ -246,29 +246,29 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
 
     LogPtr log_ptr = seastar::make_lw_shared<Log>(dev_ptr, super_block);
     auto s3 = co_await log_ptr->Init(
-        [&extent_ht](const ExtentEntry& ent) -> Status<> {
+        [&extent_ht](const ExtentEntry& ext) -> Status<> {
             Status<> s;
-            auto iter = extent_ht.find(ent.index);
+            auto iter = extent_ht.find(ext.index);
             if (iter == extent_ht.end()) {
                 s.Set(ErrCode::ErrUnExpect, "not found extent index");
                 return s;
             }
-            LOG_INFO("load a extent from log extent-{}.{} index={}", ent.id.hi,
-                     ent.id.lo, ent.index);
+            LOG_DEBUG("load a extent from log extent-{}.{} index={}", ext.id.hi,
+                      ext.id.lo, ext.index);
             auto extent_ptr = iter->second;
-            extent_ptr->id = ent.id;
-            extent_ptr->chunk_idx = ent.chunk_idx;
+            extent_ptr->id = ext.id;
+            extent_ptr->chunk_idx = ext.chunk_idx;
             return s;
         },
-        [&chunk_ht](const ChunkEntry& ent) -> Status<> {
+        [&chunk_ht](const ChunkEntry& chunk) -> Status<> {
             Status<> s;
-            if (chunk_ht.count(ent.index) != 1) {
+            if (chunk_ht.count(chunk.index) != 1) {
                 s.Set(ErrCode::ErrUnExpect, "not found chunk index");
                 return s;
             }
-            LOG_INFO("load a chunk from log index={} next={} len={}", ent.index,
-                     ent.next, ent.len);
-            chunk_ht[ent.index] = ent;
+            LOG_DEBUG("load a chunk from log index={} next={} len={}",
+                      chunk.index, (int)chunk.next, chunk.len);
+            chunk_ht[chunk.index] = chunk;
             return s;
         });
     if (!s3.OK()) {

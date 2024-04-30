@@ -1,11 +1,12 @@
+#include <pthread.h>
+#include <spdk/env.h>
 #include <yaml-cpp/yaml.h>
 
 #include <seastar/core/app-template.hh>
+#include <seastar/core/memory.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/thread.hh>
-#include <seastar/http/httpd.hh>
-#include <seastar/http/routes.hh>
 
 #include "tcp_server.h"
 #include "util/logger.h"
@@ -32,38 +33,10 @@ struct Config {
     std::set<unsigned> cpuset;
     std::string log_file;
     std::string log_level;
+    std::string hugedir;
+    std::string memory;
     NetConfig net_cfg;
     std::vector<DiskConfig> disks_cfg;
-};
-
-class stop_signal {
-    bool _caught = false;
-    seastar::condition_variable _cond;
-
-   private:
-    void signaled() {
-        if (_caught) {
-            return;
-        }
-        _caught = true;
-        _cond.broadcast();
-    }
-
-   public:
-    stop_signal() {
-        seastar::engine().handle_signal(SIGINT, [this] { signaled(); });
-        seastar::engine().handle_signal(SIGTERM, [this] { signaled(); });
-    }
-    ~stop_signal() {
-        // There's no way to unregister a handler yet, so register a no-op
-        // handler instead.
-        seastar::engine().handle_signal(SIGINT, [] {});
-        seastar::engine().handle_signal(SIGTERM, [] {});
-    }
-    seastar::future<> wait() {
-        return _cond.wait([this] { return _caught; });
-    }
-    bool stopping() const { return _caught; }
 };
 
 static void ParseDiskConfig(const YAML::Node& node, DiskConfig& cfg) {
@@ -108,6 +81,12 @@ static bool ParseConfigFile(const std::string& name, Config& cfg) {
     }
     if (doc["log_level"]) {
         cfg.log_file = doc["log_level"].as<std::string>();
+    }
+    if (doc["memory"]) {
+        cfg.memory = doc["memory"].as<std::string>();
+    }
+    if (doc["hugedir"]) {
+        cfg.hugedir = doc["hugedir"].as<std::string>();
     }
 
     if (doc["cpuset"] && doc["cpuset"].IsSequence()) {
@@ -191,10 +170,10 @@ static seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> CreateService(
 int main(int argc, char** argv) {
     boost::program_options::options_description desc;
     desc.add_options()("help,h", "show help message");
+    desc.add_options()("config,c", bpo::value<std::string>(), "config file");
     desc.add_options()("format", bpo::value<std::string>(), "format disk");
     desc.add_options()("spdk_nvme", bpo::value<bool>(),
                        "if spdk nvme, set true");
-    desc.add_options()("config,c", bpo::value<bool>(), "config file");
 
     bpo::variables_map vm;
     try {
@@ -244,6 +223,8 @@ int main(int argc, char** argv) {
     }
 
     seastar::app_template::seastar_options opts;
+    opts.auto_handle_sigint_sigterm = false;
+    opts.reactor_opts.abort_on_seastar_bad_alloc.set_value();
     if (cfg.poll_mode) {
         opts.reactor_opts.poll_mode.set_value();
     }
@@ -257,13 +238,33 @@ int main(int argc, char** argv) {
             opts.smp_opts.smp.set_value(1);
         }
     }
+    if (!cfg.memory.empty()) {
+        opts.smp_opts.memory.set_value(cfg.memory);
+    }
+    if (!cfg.hugedir.empty()) {
+        opts.smp_opts.hugepages.set_value(cfg.hugedir);
+    }
     seastar::app_template app(std::move(opts));
+
+#ifdef HAS_SPDK
+    struct spdk_env_opts spdk_opts;
+    spdk_env_opts_init(&spdk_opts);
+    spdk_opts.name = argv[0];
+    if (!cfg.hugedir.empty()) {
+        spdk_opts.hugedir = cfg.hugedir.c_str();
+    }
+    if (spdk_env_init(&spdk_opts) < 0) {
+        LOG_ERROR("Unable to initialize SPDK env");
+        return 0;
+    }
+    spdk_unaffinitize_thread();
+#endif
+
     char* args[1] = {argv[0]};
     return app.run(
         1, args,
         [is_format, format_disk, spdk_nvme, cfg]() -> seastar::future<> {
             return seastar::async([is_format, format_disk, spdk_nvme, cfg]() {
-                stop_signal signal;
                 if (is_format) {
                     auto ok =
                         snail::stream::Store::Format(
