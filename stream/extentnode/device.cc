@@ -35,6 +35,7 @@ class KernelDevice : public Device {
             ptr->fp_ =
                 co_await seastar::open_file_dma(name, seastar::open_flags::rw);
             ptr->capacity_ = co_await ptr->fp_.size();
+            ptr->capacity_ = seastar::align_down(ptr->capacity_, kSectorSize);
         } catch (std::exception& e) {
             LOG_ERROR("open disk {} error: {}", name, e.what());
             if (ptr->fp_) {
@@ -65,6 +66,15 @@ class KernelDevice : public Device {
             co_return s;
         }
         seastar::gate::holder(gate_);
+        if ((pos & kSectorSizeMask) || (len & kSectorSizeMask) ||
+            (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
+            s.Set(EINVAL);
+            co_return s;
+        }
+        if (pos + len > capacity_) {
+            s.Set(ERANGE);
+            co_return s;
+        }
         try {
             auto n = co_await fp_.dma_write(pos, b, len);
             if (n != len) {
@@ -87,9 +97,23 @@ class KernelDevice : public Device {
             co_return s;
         }
         seastar::gate::holder(gate_);
+        if (pos & kSectorSizeMask) {
+            s.Set(EINVAL);
+            co_return s;
+        }
+        int n = iov.size();
         try {
-            int n = iov.size();
             for (int i = 0; i < n; i++) {
+                if (pos + iov[i].iov_len > capacity_) {
+                    s.Set(ERANGE);
+                    break;
+                }
+                if ((reinterpret_cast<uintptr_t>(iov[i].iov_base) &
+                     kMemoryAlignmentMask) ||
+                    (iov[i].iov_len & kSectorSizeMask)) {
+                    s.Set(EINVAL);
+                    break;
+                }
                 auto fu = fp_.dma_write(
                     pos, reinterpret_cast<const char*>(iov[i].iov_base),
                     iov[i].iov_len);
@@ -98,7 +122,7 @@ class KernelDevice : public Device {
             }
             auto res = co_await seastar::when_all_succeed(fu_vec.begin(),
                                                           fu_vec.end());
-            for (int i = 0; i < n; i++) {
+            for (int i = 0; i < res.size(); i++) {
                 if (res[i] != iov[i].iov_len) {
                     s.Set(ErrCode::ErrUnExpect, "return unexpect bytes");
                     break;
@@ -121,6 +145,16 @@ class KernelDevice : public Device {
             co_return s;
         }
         seastar::gate::holder(gate_);
+        if ((pos & kSectorSizeMask) || (len & kSectorSizeMask) ||
+            (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
+            s.Set(EINVAL);
+            co_return s;
+        }
+        if (pos >= capacity_) {
+            co_return s;
+        } else if (pos + len > capacity_) {
+            len = capacity_ - pos;
+        }
         try {
             size_t n = co_await fp_.dma_read<char>(pos, b, len);
             s.SetValue(n);
@@ -202,7 +236,8 @@ class SpdkDevice : public Device {
                 }
                 req->dev_ptr->ctrlr_ = ctrlr;
                 req->dev_ptr->ns_ = ns;
-                req->dev_ptr->capacity_ = spdk_nvme_ns_get_size(ns);
+                req->dev_ptr->capacity_ =
+                    seastar::align_down(spdk_nvme_ns_get_size(ns), kSectorSize);
                 req->pr.set_value(0);
                 return;
             }
@@ -326,9 +361,12 @@ class SpdkDevice : public Device {
         std::unique_ptr<request> req(new request);
         req->dev_ptr = this;
         if ((reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask) ||
-            (len & kSectorSizeMask) ||
-            (reinterpret_cast<uintptr_t>(pos) & kSectorSizeMask)) {
+            (len & kSectorSizeMask) || (pos & kSectorSizeMask)) {
             s.Set(EINVAL);
+            co_return s;
+        }
+        if (pos + len > capacity_) {
+            s.Set(ERANGE);
             co_return s;
         }
         auto res = spdk_nvme_ns_cmd_write(
@@ -377,6 +415,10 @@ class SpdkDevice : public Device {
             if (((uint64_t)iov[i].iov_base & kMemoryAlignmentMask) ||
                 (iov[i].iov_len & kSectorSizeMask)) {
                 s.Set(EINVAL);
+                break;
+            }
+            if (pos + iov[i].iov_len > capacity_) {
+                s.Set(ERANGE);
                 break;
             }
             std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
@@ -437,6 +479,12 @@ class SpdkDevice : public Device {
             (len & kSectorSizeMask)) {
             s.Set(EINVAL);
             co_return s;
+        }
+        if (pos >= capacity_) {
+            s.SetValue(0);
+            co_return s;
+        } else if (pos + len > capacity_) {
+            len = capacity_ - pos;
         }
         std::unique_ptr<SpdkDevice::request> req(new SpdkDevice::request);
         req->dev_ptr = this;

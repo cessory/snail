@@ -334,6 +334,8 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     if (capacity == 0) {
         capacity = cap;
     } else if (capacity > cap) {
+        LOG_ERROR("capacity {} is larger than device capacity {}", capacity,
+                  cap);
         co_await dev_ptr->Close();
         co_return false;
     }
@@ -394,7 +396,7 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     super_block.pt[DATA_PT].size = data_size;
 
     LOG_INFO(
-        "device {} capacity: {} extent_meta: (start={} size={}) "
+        "Format device {} capacity: {} extent_meta: (start={} size={}) "
         "chunk_meta: (start={} size={}) loga: (start={} size={}) logb: "
         "(start={} size={}) data: (start={}, size={})",
         name, capacity, super_block.pt[EXTENT_PT].start,
