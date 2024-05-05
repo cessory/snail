@@ -501,7 +501,7 @@ seastar::future<> Log::LoopRun() {
     co_return;
 }
 
-seastar::future<Status<>> Log::SaveChunk(const ChunkEntry &chunk) {
+seastar::future<Status<>> Log::SaveChunk(ChunkEntry chunk) {
     Status<> s;
     if (closed_ || !init_) {
         s.Set(EPIPE);
@@ -515,16 +515,14 @@ seastar::future<Status<>> Log::SaveChunk(const ChunkEntry &chunk) {
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(chunk));
     queue_.push(ptr.get());
     cv_.signal();
-    s = co_await ptr->pr.get_future().then([](Status<> st) {
-        return seastar::make_ready_future<Status<>>(std::move(st));
-    });
+    s = co_await ptr->pr.get_future();
     LOG_DEBUG(
         "save chunk (index={}, next={}, len={}, crc={}, scrc={}) success!",
         chunk.index, chunk.next, chunk.len, chunk.crc, chunk.scrc);
     co_return s;
 }
 
-seastar::future<Status<>> Log::SaveExtent(const ExtentEntry &extent) {
+seastar::future<Status<>> Log::SaveExtent(ExtentEntry extent) {
     Status<> s;
     if (closed_ || !init_) {
         s.Set(EPIPE);
@@ -538,9 +536,7 @@ seastar::future<Status<>> Log::SaveExtent(const ExtentEntry &extent) {
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(extent));
     queue_.push(ptr.get());
     cv_.signal();
-    s = co_await ptr->pr.get_future().then([](Status<> st) {
-        return seastar::make_ready_future<Status<>>(std::move(st));
-    });
+    s = co_await ptr->pr.get_future();
     LOG_DEBUG("save extent (index={}, id={}-{}, chunk_idx={}) success!",
               extent.index, extent.id.hi, extent.id.lo, extent.chunk_idx);
     co_return s;

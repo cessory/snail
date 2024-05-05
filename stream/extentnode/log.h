@@ -62,9 +62,9 @@ class Log {
         seastar::noncopyable_function<Status<>(const ExtentEntry &)> &&f1,
         seastar::noncopyable_function<Status<>(const ChunkEntry &)> &&f2);
 
-    seastar::future<Status<>> SaveChunk(const ChunkEntry &chunk);
+    seastar::future<Status<>> SaveChunk(ChunkEntry chunk);
 
-    seastar::future<Status<>> SaveExtent(const ExtentEntry &extent);
+    seastar::future<Status<>> SaveExtent(ExtentEntry extent);
 
     seastar::future<> Close();
 };

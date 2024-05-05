@@ -44,7 +44,7 @@ class KernelDevice : public Device {
             co_return seastar::coroutine::return_exception(std::move(e));
         }
         ptr->name_ = name;
-        co_return dynamic_pointer_cast<Device, KernelDevice>(ptr);
+        co_return seastar::dynamic_pointer_cast<Device, KernelDevice>(ptr);
     }
 
     const std::string& Name() const override { return name_; }
