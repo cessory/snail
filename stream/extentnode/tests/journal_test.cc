@@ -1,4 +1,4 @@
-#include "extentnode/log.h"
+#include "extentnode/journal.h"
 
 #include <seastar/core/thread.hh>
 #include <seastar/testing/test_case.hh>
@@ -115,38 +115,89 @@ SEASTAR_THREAD_TEST_CASE(save_chunk_test) {
 
     Status<> s;
     {
-        Log log(dev_ptr, super_block);
-        s = log.Init([](const ExtentEntry&) -> Status<> { return Status<>(); },
-                     [](const ChunkEntry&) -> Status<> { return Status<>(); })
+        Journal journal(dev_ptr, super_block);
+        s = journal
+                .Init([](const ExtentEntry&) -> Status<> { return Status<>(); },
+                      [](const ChunkEntry&) -> Status<> { return Status<>(); })
                 .get0();
         BOOST_REQUIRE(s);
 
         for (int i = 0; i < 10; i++) {
             ChunkEntry entry;
             entry.index = i;
-            s = log.SaveChunk(entry).get0();
+            s = journal.SaveChunk(entry).get0();
             BOOST_REQUIRE(s);
         }
-        log.Close().get();
+        journal.Close().get();
     }
 
     {
-        Log log(dev_ptr, super_block);
+        Journal journal(dev_ptr, super_block);
         std::vector<ChunkEntry> chunks;
-        s = log.Init([&chunks](
-                         const ExtentEntry&) -> Status<> { return Status<>(); },
-                     [&chunks](const ChunkEntry& chunk) -> Status<> {
-                         chunks.push_back(chunk);
-                         return Status<>();
-                     })
+        s = journal
+                .Init(
+                    [&chunks](const ExtentEntry&) -> Status<> {
+                        return Status<>();
+                    },
+                    [&chunks](const ChunkEntry& chunk) -> Status<> {
+                        chunks.push_back(chunk);
+                        return Status<>();
+                    })
                 .get0();
         BOOST_REQUIRE(s);
         BOOST_REQUIRE_EQUAL(chunks.size(), 10);
         for (int i = 0; i < 10; i++) {
             BOOST_REQUIRE_EQUAL(chunks[i].index, (uint32_t)i);
         }
-        log.Close().get();
+        journal.Close().get();
     }
+    dev_ptr->Close().get();
+}
+
+SEASTAR_THREAD_TEST_CASE(save_extent_test) {
+    auto pair_dev = MemDev::make_memory_device();
+    auto dev_ptr = pair_dev.first;
+    auto super_block = pair_dev.second;
+
+    Status<> s;
+    {
+        Journal journal(dev_ptr, super_block);
+        s = journal
+                .Init([](const ExtentEntry&) -> Status<> { return Status<>(); },
+                      [](const ChunkEntry&) -> Status<> { return Status<>(); })
+                .get0();
+        BOOST_REQUIRE(s);
+
+        for (int i = 0; i < 10; i++) {
+            ExtentEntry entry;
+            entry.index = i;
+            s = journal.SaveExtent(entry).get0();
+            BOOST_REQUIRE(s);
+        }
+        journal.Close().get();
+    }
+
+    {
+        Journal journal(dev_ptr, super_block);
+        std::vector<ExtentEntry> extents;
+        s = journal
+                .Init(
+                    [&extents](const ExtentEntry& extent) -> Status<> {
+                        extents.push_back(extent);
+                        return Status<>();
+                    },
+                    [](const ChunkEntry& chunk) -> Status<> {
+                        return Status<>();
+                    })
+                .get0();
+        BOOST_REQUIRE(s);
+        BOOST_REQUIRE_EQUAL(extents.size(), 10);
+        for (int i = 0; i < 10; i++) {
+            BOOST_REQUIRE_EQUAL(extents[i].index, (uint32_t)i);
+        }
+        journal.Close().get();
+    }
+    dev_ptr->Close().get();
 }
 
 }  // namespace stream

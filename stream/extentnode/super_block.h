@@ -9,8 +9,8 @@ namespace stream {
 enum {
     EXTENT_PT = 0,
     CHUNK_PT = 1,
-    LOGA_PT = 2,
-    LOGB_PT = 3,
+    JOURNALA_PT = 2,
+    JOURNALB_PT = 3,
     DATA_PT = 4,
     MAX_PT = 5,
 };
@@ -64,10 +64,10 @@ struct SuperBlock {
     inline uint64_t ChunkMetaOffset() const { return pt[CHUNK_PT].start; }
     inline uint64_t ChunkMetaSize() const { return pt[CHUNK_PT].size; }
 
-    inline uint64_t Log1Offset() const { return pt[LOGA_PT].start; }
-    inline uint64_t Log1Size() const { return pt[LOGA_PT].size; }
-    inline uint64_t Log2Offset() const { return pt[LOGB_PT].start; }
-    inline uint64_t Log2Size() const { return pt[LOGB_PT].size; }
+    inline uint64_t Journal1Offset() const { return pt[JOURNALA_PT].start; }
+    inline uint64_t Journal1Size() const { return pt[JOURNALA_PT].size; }
+    inline uint64_t Journal2Offset() const { return pt[JOURNALB_PT].start; }
+    inline uint64_t Journal2Size() const { return pt[JOURNALB_PT].size; }
 
     inline uint64_t DataOffset() const { return pt[DATA_PT].start; }
     inline uint64_t DataSize() const { return pt[DATA_PT].size; }

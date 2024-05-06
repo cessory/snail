@@ -1,4 +1,4 @@
-#include "log.h"
+#include "journal.h"
 
 #include <isa-l.h>
 
@@ -21,7 +21,7 @@ static constexpr int kRecordHeaderSize =
     4 + 8 + 2 + 1;  // crc + ver + len + type
 static constexpr size_t kMaxMemSize = 8192;
 
-// log format
+// journal format
 // |   header    |             data                         |
 // | header(512B) |    block(512B)  |   ....  |   block   |
 //
@@ -30,7 +30,7 @@ static constexpr size_t kMaxMemSize = 8192;
 // | crc(4B) |  version(8B)  |len(2B)|type(1B)|      data    |
 //
 
-static void LogHeaderMarshalTo(uint64_t ver, uint8_t flag, char *b) {
+static void JournalHeaderMarshalTo(uint64_t ver, uint8_t flag, char *b) {
     net::BigEndian::PutUint64(b + 4, ver);
     *(b + 12) = flag;
     uint32_t crc = crc32_gzip_refl(
@@ -38,12 +38,12 @@ static void LogHeaderMarshalTo(uint64_t ver, uint8_t flag, char *b) {
     net::BigEndian::PutUint32(b, crc);
 }
 
-Log::Log(DevicePtr dev_ptr, const SuperBlock &super_block)
+Journal::Journal(DevicePtr dev_ptr, const SuperBlock &super_block)
     : dev_ptr_(dev_ptr), super_(super_block) {
-    offset_ = super_.pt[LOGA_PT].start;
+    offset_ = super_.pt[JOURNALA_PT].start;
 }
 
-void Log::worker_item::MarshalTo(uint64_t ver, char *b) {
+void Journal::worker_item::MarshalTo(uint64_t ver, char *b) {
     uint16_t len = kExtentEntrySize;
     EntryType type = EntryType::Extent;
     if (entry.index() == 1) {
@@ -68,7 +68,7 @@ void Log::worker_item::MarshalTo(uint64_t ver, char *b) {
     net::BigEndian::PutUint32(b, crc);
 }
 
-seastar::future<Status<>> Log::Init(
+seastar::future<Status<>> Journal::Init(
     seastar::noncopyable_function<Status<>(const ExtentEntry &)> &&f1,
     seastar::noncopyable_function<Status<>(const ChunkEntry &)> &&f2) {
     Status<> s;
@@ -77,18 +77,20 @@ seastar::future<Status<>> Log::Init(
         co_return s;
     }
     init_ = true;
-    auto buf =
-        seastar::temporary_buffer<char>::aligned(kMemoryAlignment, kBlockSize);
+    seastar::gate::holder(gate_);
+    auto buf = dev_ptr_->Get(kBlockSize);
 
     uint64_t ver[2];
     int index[2] = {0, 1};
     uint8_t flags[2] = {0, 0};
+
+    // read log head
     for (int i = 0; i < 2; i++) {
-        auto st = co_await dev_ptr_->Read(super_.pt[LOGA_PT + i].start,
+        auto st = co_await dev_ptr_->Read(super_.pt[JOURNALA_PT + i].start,
                                           buf.get_write(), kSectorSize);
         if (!st.OK()) {
-            LOG_ERROR("read log head from device {} log-{} error: {}",
-                      dev_ptr_->Name(), i, st.String());
+            LOG_ERROR("read journal head from device {} log-{} error: {}",
+                      dev_ptr_->Name(), i, st);
             s.Set(st.Code(), st.Reason());
             co_return s;
         }
@@ -96,13 +98,13 @@ seastar::future<Status<>> Log::Init(
         ver[i] = net::BigEndian::Uint64(buf.get() + 4);
         flags[i] = *(buf.get() + 12);
         if (crc == 0 && ver[i] == 0) {
-            LOG_INFO("device-{} log-{} is emtpy", dev_ptr_->Name(), i);
+            LOG_INFO("device-{} journal-{} is emtpy", dev_ptr_->Name(), i);
             continue;
         }
         if (crc32_gzip_refl(
                 0, reinterpret_cast<const unsigned char *>(buf.get() + 4),
                 kHeaderSize - 4) != crc) {
-            LOG_ERROR("device-{} log-{} log head has invalid checksum",
+            LOG_ERROR("device-{} journal-{} journal head has invalid checksum",
                       dev_ptr_->Name(), i);
             co_return Status<>(ErrCode::ErrInvalidChecksum);
         }
@@ -112,23 +114,24 @@ seastar::future<Status<>> Log::Init(
         index[1] = 0;
     }
     for (int i = 0; i < 2; i++) {
-        int pt_n = LOGA_PT + index[i];
+        int pt_n = JOURNALA_PT + index[i];
         uint64_t offset = super_.pt[pt_n].start;
         version_ = ver[index[i]];
 
         if (version_ == 0 || flags[index[i]] != 0) {
-            LOG_INFO("device-{} log-{} don't need to reload", dev_ptr_->Name(),
-                     index[i]);
+            LOG_INFO("device-{} journal-{} don't need to reload",
+                     dev_ptr_->Name(), index[i]);
             continue;
         }
-        LOG_INFO("device-{} log-{} reload......", dev_ptr_->Name(), index[i]);
+        LOG_INFO("device-{} journal-{} reload......", dev_ptr_->Name(),
+                 index[i]);
 
         while (offset < super_.pt[pt_n].start + super_.pt[pt_n].size) {
             auto st =
                 co_await dev_ptr_->Read(offset, buf.get_write(), buf.size());
             if (!st.OK()) {
-                LOG_ERROR("device-{} log-{} read error: {}, offset={}",
-                          dev_ptr_->Name(), index[i], st.String(), offset);
+                LOG_ERROR("device-{} journal-{} read error: {}, offset={}",
+                          dev_ptr_->Name(), index[i], st, offset);
                 s.Set(st.Code(), st.Reason());
                 co_return s;
             }
@@ -169,9 +172,8 @@ seastar::future<Status<>> Log::Init(
                             kRecordHeaderSize + len - 4) !=
                         crc) {  // invalid record
                         s.Set(ErrCode::ErrInvalidChecksum);
-                        LOG_ERROR("device-{} log-{} error: {}, offset={}",
-                                  dev_ptr_->Name(), index[i], s.String(),
-                                  offset);
+                        LOG_ERROR("device-{} journal-{} error: {}, offset={}",
+                                  dev_ptr_->Name(), index[i], s, offset);
                         co_return s;
                     }
                     if (version != version_) {
@@ -185,7 +187,7 @@ seastar::future<Status<>> Log::Init(
                             ent.Unmarshal(start + kRecordHeaderSize);
                             immu_chunk_mem_[ent.index] = ent;
                             s = f2(ent);
-                            if (!s.OK()) {
+                            if (!s) {
                                 co_return s;
                             }
                             break;
@@ -195,7 +197,7 @@ seastar::future<Status<>> Log::Init(
                             ent.Unmarshal(start + kRecordHeaderSize);
                             immu_extent_mem_[ent.index] = ent;
                             s = f1(ent);
-                            if (!s.OK()) {
+                            if (!s) {
                                 co_return s;
                             }
                             break;
@@ -213,17 +215,17 @@ seastar::future<Status<>> Log::Init(
             offset += buf.size();
         }
         s = co_await BackgroundFlush(version_, super_.pt[pt_n].start);
-        if (!s.OK()) {
+        if (!s) {
             co_return s;
         }
     }
     version_++;
-    offset_ = super_.pt[index[0] + LOGA_PT].start;
+    offset_ = super_.pt[index[0] + JOURNALA_PT].start;
     loop_fu_ = LoopRun();
     co_return s;
 }
 
-seastar::future<Status<>> Log::SaveImmuChunks() {
+seastar::future<Status<>> Journal::SaveImmuChunks() {
     uint32_t prev_index = -1;
     uint32_t first_index = -1;
     Status<> s;
@@ -251,13 +253,12 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
             uint64_t off =
                 super_.pt[CHUNK_PT].start + first_index * kSectorSize;
             co_await sem.wait();
-            LOG_INFO("write off={}, len={}", off, buffer_len);
             (void)seastar::do_with(std::move(buffer.share(0, buffer_len)),
                                    [this, &sem, &s, off](auto &buf) {
                                        return dev_ptr_
                                            ->Write(off, buf.get(), buf.size())
                                            .then([&sem, &s](Status<> st) {
-                                               if (!st.OK()) {
+                                               if (!st) {
                                                    s = st;
                                                }
                                                sem.signal();
@@ -272,24 +273,24 @@ seastar::future<Status<>> Log::SaveImmuChunks() {
         }
     }
     co_await sem.wait(parallel_submit);
-    if (!s.OK()) {
-        LOG_ERROR("save chunk meta error: {}", s.String());
+    if (!s) {
+        LOG_ERROR("save chunk meta error: {}", s);
         co_return s;
     }
 
     if (buffer_len > 0) {
         uint64_t off = super_.pt[CHUNK_PT].start + first_index * kSectorSize;
         s = co_await dev_ptr_->Write(off, buffer.get(), buffer_len);
-        if (!s.OK()) {
+        if (!s) {
             LOG_ERROR(
-                "save chunk meta error: {}, off={}, first_index={}, len={}",
-                s.String(), off, first_index, buffer_len);
+                "save chunk meta error: {}, off={}, first_index={}, len={}", s,
+                off, first_index, buffer_len);
         }
     }
     co_return s;
 }
 
-seastar::future<Status<>> Log::SaveImmuExtents() {
+seastar::future<Status<>> Journal::SaveImmuExtents() {
     std::vector<iovec> iov;
     std::vector<seastar::temporary_buffer<char>> buf_vec;
     uint32_t prev_index = -1;
@@ -323,7 +324,7 @@ seastar::future<Status<>> Log::SaveImmuExtents() {
                 (void)dev_ptr_->Write(off, std::move(iov))
                     .then(
                         [&sem, &s, buf_vec = std::move(buf_vec)](Status<> st) {
-                            if (!st.OK()) {
+                            if (!st) {
                                 s = st;
                             }
                             sem.signal();
@@ -337,7 +338,7 @@ seastar::future<Status<>> Log::SaveImmuExtents() {
     }
 
     co_await sem.wait(parallel_submit);
-    if (!s.OK()) {
+    if (!s) {
         co_return s;
     }
 
@@ -348,22 +349,20 @@ seastar::future<Status<>> Log::SaveImmuExtents() {
     co_return s;
 }
 
-seastar::future<Status<>> Log::BackgroundFlush(uint64_t ver,
-                                               uint64_t head_offset) {
+seastar::future<Status<>> Journal::BackgroundFlush(uint64_t ver,
+                                                   uint64_t head_offset) {
     Status<> s;
 
     s = co_await SaveImmuChunks();
-    if (!s.OK()) {
-        LOG_ERROR("device-{} save chunk meta error: {}", dev_ptr_->Name(),
-                  s.String());
-        status_ = s;
+    if (!s) {
+        LOG_ERROR("device-{} save chunk meta error: {}", dev_ptr_->Name(), s);
+        status_.Set(EIO);
         co_return s;
     }
     s = co_await SaveImmuExtents();
-    if (!s.OK()) {
-        LOG_ERROR("device-{} save extent meta error: {}", dev_ptr_->Name(),
-                  s.String());
-        status_ = s;
+    if (!s) {
+        LOG_ERROR("device-{} save extent meta error: {}", dev_ptr_->Name(), s);
+        status_.Set(EIO);
         co_return s;
     }
 
@@ -377,16 +376,15 @@ seastar::future<Status<>> Log::BackgroundFlush(uint64_t ver,
     net::BigEndian::PutUint32(buf.get_write(), crc);
     s = co_await dev_ptr_->Write(head_offset, buf.get(), kSectorSize);
     if (!s.OK()) {
-        LOG_ERROR("device-{} save log head error: {}", dev_ptr_->Name(),
-                  s.String());
-        status_ = s;
+        LOG_ERROR("device-{} save journal head error: {}", dev_ptr_->Name(), s);
+        status_.Set(EIO);
         co_return s;
     }
 
     co_return s;
 }
 
-void Log::UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry) {
+void Journal::UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry) {
     if (entry.index() == 0) {
         const ExtentEntry &ent = std::get<0>(entry);
         extent_mem_[ent.index] = ent;
@@ -396,13 +394,13 @@ void Log::UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry) {
     }
 }
 
-seastar::future<> Log::LoopRun() {
+seastar::future<> Journal::LoopRun() {
     std::optional<seastar::future<Status<>>> background_fu;
 
-    while (!closed_) {
+    while (!gate_.is_closed()) {
         std::queue<worker_item *> tmp_queue;
-        uint64_t free_size = super_.pt[current_log_pt_].start +
-                             super_.pt[current_log_pt_].size - offset_;
+        uint64_t free_size = super_.pt[current_pt_].start +
+                             super_.pt[current_pt_].size - offset_;
         TmpBuffer buffer = dev_ptr_->Get(std::min(kBlockSize, free_size));
         memset(buffer.get_write(), 0, buffer.size());
         size_t buffer_len = 0;
@@ -411,10 +409,9 @@ seastar::future<> Log::LoopRun() {
             if (queue_.empty()) {
                 break;
             }
-            if (offset_ == super_.pt[current_log_pt_].start &&
-                buffer_len == 0) {
+            if (offset_ == super_.pt[current_pt_].start && buffer_len == 0) {
                 // add head
-                LogHeaderMarshalTo(version_, 0, buffer.get_write());
+                JournalHeaderMarshalTo(version_, 0, buffer.get_write());
                 buffer_len += kSectorSize;
             }
             auto item = queue_.front();
@@ -435,54 +432,53 @@ seastar::future<> Log::LoopRun() {
         }
 
         Status<> s = status_;
-        if (!tmp_queue.empty() && s.OK()) {
+        if (!tmp_queue.empty() && s) {
             s = co_await dev_ptr_->Write(
                 offset_, buffer.get(),
                 seastar::align_up(buffer_len, kSectorSize));
         }
-        if (s.OK()) {
+        if (s) {
             offset_ += seastar::align_up(buffer_len, kSectorSize);
         } else {
-            if (status_.OK()) {
-                status_ = s;
+            LOG_ERROR("write journal error: {}, dev_name={}, offset={}", s,
+                      dev_ptr_->Name(), offset_);
+            if (status_) {
+                status_.Set(EIO);
             }
         }
         while (!tmp_queue.empty()) {
             auto tmp_item = tmp_queue.front();
             tmp_queue.pop();
-            if (s.OK()) {
+            if (s) {
                 UpdateMem(tmp_item->entry);
             }
             auto st = s;
             tmp_item->pr.set_value(std::move(st));
         }
 
-        if (s.OK() && (offset_ >= super_.pt[current_log_pt_].start +
-                                      super_.pt[current_log_pt_].size)) {
-            uint64_t old_header_offset = super_.pt[current_log_pt_].start;
+        if (s && (offset_ >=
+                  super_.pt[current_pt_].start + super_.pt[current_pt_].size)) {
+            uint64_t old_header_offset = super_.pt[current_pt_].start;
             uint64_t old_version = version_;
-            current_log_pt_ = (current_log_pt_ + 1) % 2 + LOGA_PT;
-            offset_ = super_.pt[current_log_pt_].start;
+            current_pt_ = (current_pt_ + 1) % 2 + JOURNALA_PT;
+            offset_ = super_.pt[current_pt_].start;
             version_++;
             if (background_fu) {
-                auto fu = std::move(*background_fu);
-                s = co_await fu.then([](Status<> st) {
-                    return seastar::make_ready_future<Status<>>(std::move(st));
-                });
+                s = co_await std::move(background_fu.value());
                 background_fu.reset();
                 if (!s.OK()) {
+                    LOG_ERROR(
+                        "Flush journal error: {}, whatever error is, we should "
+                        "treat this error as EIO",
+                        s);
                     break;
                 }
-            }
-            if (closed_) {
-                status_.Set(EPIPE);
-                break;
             }
             immu_chunk_mem_ = std::move(chunk_mem_);
             immu_extent_mem_ = std::move(extent_mem_);
             background_fu = BackgroundFlush(old_version, old_header_offset);
         }
-        if (queue_.empty() && !closed_) {
+        if (queue_.empty() && !gate_.is_closed()) {
             co_await cv_.wait();
         }
     }
@@ -494,16 +490,19 @@ seastar::future<> Log::LoopRun() {
         item->pr.set_value(std::move(s));
     }
     if (background_fu) {
-        auto fu = std::move(*background_fu);
-        co_await fu.discard_result();
+        co_await std::move(background_fu.value());
+        background_fu.reset();
     }
-    background_fu.reset();
     co_return;
 }
 
-seastar::future<Status<>> Log::SaveChunk(ChunkEntry chunk) {
+seastar::future<Status<>> Journal::SaveChunk(ChunkEntry chunk) {
     Status<> s;
-    if (closed_ || !init_) {
+    if (!init_) {
+        s.Set(ENOTSUP);
+        co_return s;
+    }
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
@@ -511,6 +510,7 @@ seastar::future<Status<>> Log::SaveChunk(ChunkEntry chunk) {
         s = status_;
         co_return s;
     }
+    seastar::gate::holder(gate_);
     std::unique_ptr<worker_item> ptr(new worker_item);
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(chunk));
     queue_.push(ptr.get());
@@ -522,9 +522,13 @@ seastar::future<Status<>> Log::SaveChunk(ChunkEntry chunk) {
     co_return s;
 }
 
-seastar::future<Status<>> Log::SaveExtent(ExtentEntry extent) {
+seastar::future<Status<>> Journal::SaveExtent(ExtentEntry extent) {
     Status<> s;
-    if (closed_ || !init_) {
+    if (!init_) {
+        s.Set(ENOTSUP);
+        co_return s;
+    }
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
@@ -532,6 +536,7 @@ seastar::future<Status<>> Log::SaveExtent(ExtentEntry extent) {
         s = status_;
         co_return s;
     }
+    seastar::gate::holder(gate_);
     std::unique_ptr<worker_item> ptr(new worker_item);
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(extent));
     queue_.push(ptr.get());
@@ -542,13 +547,13 @@ seastar::future<Status<>> Log::SaveExtent(ExtentEntry extent) {
     co_return s;
 }
 
-seastar::future<> Log::Close() {
-    if (!closed_) {
-        closed_ = true;
+seastar::future<> Journal::Close() {
+    if (!gate_.is_closed()) {
         cv_.signal();
+        co_await gate_.close();
         if (loop_fu_) {
-            auto fu = std::move(*loop_fu_);
-            co_await fu.discard_result();
+            co_await std::move(loop_fu_.value());
+            loop_fu_.reset();
         }
     }
     co_return;

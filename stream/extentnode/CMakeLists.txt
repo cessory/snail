@@ -1,6 +1,6 @@
 set(src 
     "device.cc"
-    "log.cc"
+    "journal.cc"
     "service.cc"
     "store.cc"
     "super_block.cc"

@@ -12,7 +12,7 @@
 #include <unordered_set>
 
 #include "device.h"
-#include "log.h"
+#include "journal.h"
 #include "super_block.h"
 #include "types.h"
 #include "util/lru_cache.h"
@@ -46,7 +46,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     std::queue<uint32_t> free_extents_;
     std::queue<uint32_t> free_chunks_;
 
-    LogPtr log_ptr_;
+    JournalPtr journal_ptr_;
 
     // key = extent index
     LRUCache<uint32_t, std::string> last_sector_cache_;

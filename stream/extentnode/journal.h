@@ -5,6 +5,7 @@
 #include <queue>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include <variant>
 
 #include "device.h"
@@ -15,13 +16,13 @@
 namespace snail {
 namespace stream {
 
-class Log {
+class Journal {
     DevicePtr dev_ptr_;
     SuperBlock super_;
 
     bool init_ = false;
     uint64_t version_ = 0;
-    int current_log_pt_ = LOGA_PT;
+    int current_pt_ = JOURNALA_PT;
     uint64_t offset_;  // current offset
 
     std::map<uint32_t, ChunkEntry> chunk_mem_;
@@ -42,7 +43,7 @@ class Log {
     std::queue<worker_item *> queue_;
     seastar::condition_variable cv_;
     Status<> status_;
-    bool closed_ = false;
+    seastar::gate gate_;
     std::optional<seastar::future<>> loop_fu_;
 
     seastar::future<> LoopRun();
@@ -56,7 +57,7 @@ class Log {
     void UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry);
 
    public:
-    explicit Log(DevicePtr dev_ptr, const SuperBlock &super_block);
+    explicit Journal(DevicePtr dev_ptr, const SuperBlock &super_block);
 
     seastar::future<Status<>> Init(
         seastar::noncopyable_function<Status<>(const ExtentEntry &)> &&f1,
@@ -69,7 +70,7 @@ class Log {
     seastar::future<> Close();
 };
 
-using LogPtr = seastar::lw_shared_ptr<Log>;
+using JournalPtr = seastar::lw_shared_ptr<Journal>;
 
 }  // namespace stream
 }  // namespace snail
