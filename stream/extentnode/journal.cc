@@ -226,16 +226,39 @@ seastar::future<Status<>> Journal::Init(
 }
 
 seastar::future<Status<>> Journal::SaveImmuChunks() {
-    uint32_t prev_index = -1;
-    uint32_t first_index = -1;
     Status<> s;
-    static size_t parallel_submit = 16;
-    seastar::semaphore sem(parallel_submit);
-    auto buffer = dev_ptr_->Get(parallel_submit * kSectorSize);
-    size_t buffer_len = 0;
+    uint32_t prev_index = -1;
+    uint32_t start_index = -1;
+    auto buffer = dev_ptr_->Get(kBlockSize);
+    size_t buffer_off = 0;
+    std::optional<seastar::future<Status<>>> fu;
 
     for (auto iter : immu_chunk_mem_) {
-        auto buf = buffer.share(buffer_len, kSectorSize);
+        if (start_index == -1) {
+            start_index = iter.first;
+        }
+
+        if ((prev_index != -1 && iter.first != prev_index + 1) ||
+            buffer_off + kSectorSize >= buffer.size()) {
+            if (fu) {
+                s = co_await std::move(fu.value());
+                fu.reset();
+                if (!s) {
+                    break;
+                }
+            }
+            uint64_t off =
+                super_.pt[CHUNK_PT].start + start_index * kSectorSize;
+            fu = seastar::do_with(
+                buffer.share(0, buffer_off), [this, off](TmpBuffer &b) {
+                    return dev_ptr_->Write(off, b.get(), b.size());
+                });
+            start_index = iter.first;
+            prev_index = iter.first;
+            buffer_off = 0;
+            buffer = dev_ptr_->Get(kBlockSize);
+        }
+        auto buf = buffer.share(buffer_off, kSectorSize);
         net::BigEndian::PutUint16(buf.get_write() + 4, kChunkEntrySize);
         iter.second.MarshalTo(buf.get_write() + 6);
         net::BigEndian::PutUint32(
@@ -243,64 +266,58 @@ seastar::future<Status<>> Journal::SaveImmuChunks() {
             crc32_gzip_refl(
                 0, reinterpret_cast<const unsigned char *>(buf.get() + 4),
                 kChunkEntrySize + 2));
-        buffer_len += kSectorSize;
-
-        if (first_index == -1) {
-            first_index = iter.first;
-            prev_index = iter.first;
-        } else if (iter.second.index != prev_index + 1 ||
-                   buffer_len == buffer.size()) {
-            uint64_t off =
-                super_.pt[CHUNK_PT].start + first_index * kSectorSize;
-            co_await sem.wait();
-            (void)seastar::do_with(std::move(buffer.share(0, buffer_len)),
-                                   [this, &sem, &s, off](auto &buf) {
-                                       return dev_ptr_
-                                           ->Write(off, buf.get(), buf.size())
-                                           .then([&sem, &s](Status<> st) {
-                                               if (!st) {
-                                                   s = st;
-                                               }
-                                               sem.signal();
-                                           });
-                                   });
-            first_index = -1;
-            prev_index = -1;
-            buffer_len = 0;
-            buffer = dev_ptr_->Get(parallel_submit * kSectorSize);
-        } else {
-            prev_index = iter.first;
-        }
+        buffer_off += kSectorSize;
+        prev_index = iter.first;
     }
-    co_await sem.wait(parallel_submit);
+    if (fu) {
+        s = co_await std::move(fu.value());
+        fu.reset();
+    }
     if (!s) {
         LOG_ERROR("save chunk meta error: {}", s);
         co_return s;
     }
-
-    if (buffer_len > 0) {
-        uint64_t off = super_.pt[CHUNK_PT].start + first_index * kSectorSize;
-        s = co_await dev_ptr_->Write(off, buffer.get(), buffer_len);
-        if (!s) {
-            LOG_ERROR(
-                "save chunk meta error: {}, off={}, first_index={}, len={}", s,
-                off, first_index, buffer_len);
-        }
+    if (buffer_off > 0) {
+        uint64_t off = super_.pt[CHUNK_PT].start + start_index * kSectorSize;
+        s = co_await dev_ptr_->Write(off, buffer.get(), buffer_off);
     }
     co_return s;
 }
 
 seastar::future<Status<>> Journal::SaveImmuExtents() {
-    std::vector<iovec> iov;
-    std::vector<seastar::temporary_buffer<char>> buf_vec;
-    uint32_t prev_index = -1;
-    uint32_t first_index = -1;
     Status<> s;
-    static size_t parallel_submit = 16;
-    seastar::semaphore sem(parallel_submit);
+    uint32_t prev_index = -1;
+    uint32_t start_index = -1;
+    auto buffer = dev_ptr_->Get(kBlockSize);
+    size_t buffer_off = 0;
+    std::optional<seastar::future<Status<>>> fu;
 
     for (auto iter : immu_extent_mem_) {
-        auto buf = dev_ptr_->Get(kSectorSize);
+        if (start_index == -1) {
+            start_index = iter.first;
+        }
+
+        if ((prev_index != -1 && iter.first != prev_index + 1) ||
+            buffer_off + kSectorSize >= buffer.size()) {
+            if (fu) {
+                s = co_await std::move(fu.value());
+                fu.reset();
+                if (!s) {
+                    break;
+                }
+            }
+            uint64_t off =
+                super_.pt[EXTENT_PT].start + start_index * kSectorSize;
+            fu = seastar::do_with(
+                buffer.share(0, buffer_off), [this, off](TmpBuffer &b) {
+                    return dev_ptr_->Write(off, b.get(), b.size());
+                });
+            start_index = iter.first;
+            prev_index = iter.first;
+            buffer_off = 0;
+            buffer = dev_ptr_->Get(kBlockSize);
+        }
+        auto buf = buffer.share(buffer_off, kSectorSize);
         net::BigEndian::PutUint16(buf.get_write() + 4, kExtentEntrySize);
         iter.second.MarshalTo(buf.get_write() + 6);
         net::BigEndian::PutUint32(
@@ -309,42 +326,21 @@ seastar::future<Status<>> Journal::SaveImmuExtents() {
                 0, reinterpret_cast<const unsigned char *>(buf.get() + 4),
                 kExtentEntrySize + 2));
 
-        if (buf_vec.size() == 0) {
-            iov.push_back({buf.get_write(), buf.size()});
-            buf_vec.emplace_back(std::move(buf));
-            first_index = iter.first;
-            prev_index = first_index;
-        } else {
-            if (iter.second.index == prev_index + 1) {
-                iov.push_back({buf.get_write(), buf.size()});
-            } else {
-                uint64_t off =
-                    super_.pt[EXTENT_PT].start + first_index * kSectorSize;
-                co_await sem.wait();
-                (void)dev_ptr_->Write(off, std::move(iov))
-                    .then(
-                        [&sem, &s, buf_vec = std::move(buf_vec)](Status<> st) {
-                            if (!st) {
-                                s = st;
-                            }
-                            sem.signal();
-                        });
-                iov.push_back({buf.get_write(), buf.size()});
-                first_index = iter.first;
-            }
-            buf_vec.emplace_back(std::move(buf));
-            prev_index = iter.first;
-        }
+        buffer_off += kSectorSize;
+        prev_index = iter.first;
     }
 
-    co_await sem.wait(parallel_submit);
+    if (fu) {
+        s = co_await std::move(fu.value());
+        fu.reset();
+    }
     if (!s) {
+        LOG_ERROR("save extent meta error: {}", s);
         co_return s;
     }
-
-    if (!iov.empty()) {
-        uint64_t off = super_.pt[EXTENT_PT].start + first_index * kSectorSize;
-        s = co_await dev_ptr_->Write(off, std::move(iov));
+    if (buffer_off > 0) {
+        uint64_t off = super_.pt[CHUNK_PT].start + start_index * kSectorSize;
+        s = co_await dev_ptr_->Write(off, buffer.get(), buffer_off);
     }
     co_return s;
 }
@@ -353,6 +349,7 @@ seastar::future<Status<>> Journal::BackgroundFlush(uint64_t ver,
                                                    uint64_t head_offset) {
     Status<> s;
 
+    auto startTime = std::chrono::system_clock::now();
     s = co_await SaveImmuChunks();
     if (!s) {
         LOG_ERROR("device-{} save chunk meta error: {}", dev_ptr_->Name(), s);
@@ -375,11 +372,18 @@ seastar::future<Status<>> Journal::BackgroundFlush(uint64_t ver,
         kHeaderSize - 4);
     net::BigEndian::PutUint32(buf.get_write(), crc);
     s = co_await dev_ptr_->Write(head_offset, buf.get(), kSectorSize);
-    if (!s.OK()) {
+    if (!s) {
         LOG_ERROR("device-{} save journal head error: {}", dev_ptr_->Name(), s);
         status_.Set(EIO);
         co_return s;
     }
+    auto endTime = std::chrono::system_clock::now();
+    auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(
+        endTime - startTime);
+    LOG_INFO(
+        "background flushing...... ver={} head offset={}, current_pt={} "
+        "cost={}",
+        ver, head_offset, current_pt_, cost.count());
 
     co_return s;
 }

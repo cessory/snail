@@ -71,21 +71,17 @@ static bool InvalidSuperBlock(const std::string_view& name,
     return true;
 }
 
-static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
-    std::string_view name, DevicePtr dev_ptr, uint64_t off, size_t size) {
-    Status<std::map<uint32_t, ExtentPtr>> s;
-    std::map<uint32_t, ExtentPtr> extent_ht;
-
+static seastar::future<Status<>> LoadMeta(
+    DevicePtr dev_ptr, uint64_t off, size_t size,
+    seastar::noncopyable_function<Status<>(const char*)>&& f) {
+    Status<> s;
     auto buffer = dev_ptr->Get(kBlockSize);
-    uint32_t index = 0;
     uint64_t end = off + size;
     for (; off < end; off += kBlockSize) {
         auto st =
             co_await dev_ptr->Read(off, buffer.get_write(), buffer.size());
-        if (!st.OK()) {
-            LOG_ERROR("read device {} extent meta error: {}", name,
-                      st.String());
-            s.Set(st.Code(), st.Reason());
+        if (!st) {
+            s.Set(s.Code(), s.Reason());
             co_return s;
         }
         for (const char* p = buffer.get(); p < buffer.get() + buffer.size();
@@ -95,27 +91,48 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
             if (crc32_gzip_refl(0,
                                 reinterpret_cast<const unsigned char*>(p + 4),
                                 len + 2) != crc) {
-                LOG_ERROR(
-                    "read device {} extent meta error: invalid checksum extent "
-                    "index={}",
-                    name, index);
                 s.Set(ErrCode::ErrInvalidChecksum);
                 co_return s;
             }
+            s = f(p + 6);
+            if (!s) {
+                co_return s;
+            }
+        }
+    }
+    co_return s;
+}
+
+static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
+    std::string_view name, DevicePtr dev_ptr, uint64_t off, size_t size) {
+    Status<std::map<uint32_t, ExtentPtr>> s;
+    std::map<uint32_t, ExtentPtr> extent_ht;
+    uint32_t index = 0;
+
+    auto st = co_await LoadMeta(
+        dev_ptr, off, size,
+        [&extent_ht, &index, dev_ptr](const char* b) -> Status<> {
+            Status<> s;
             auto extent_ptr = seastar::make_lw_shared<Extent>();
-            extent_ptr->Unmarshal(p + 6);
+            extent_ptr->Unmarshal(b);
             if (extent_ptr->index != index) {
                 LOG_ERROR(
                     "read device {} extent meta error: invalid index "
                     "index={} expect index={}",
-                    name, extent_ptr->index, index);
+                    dev_ptr->Name(), extent_ptr->index, index);
                 s.Set(ErrCode::ErrUnExpect, "invalid index");
-                co_return s;
+                return s;
             }
             extent_ht[index] = extent_ptr;
             index++;
-        }
+            return s;
+        });
+    if (!st) {
+        LOG_ERROR("load extent meta error: {} device={}", st, dev_ptr->Name());
+        s.Set(st.Code(), st.Reason());
+        co_return s;
     }
+
     s.SetValue(std::move(extent_ht));
     co_return s;
 }
@@ -124,44 +141,32 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
     std::string_view name, DevicePtr dev_ptr, uint64_t off, size_t size) {
     Status<std::map<uint32_t, ChunkEntry>> s;
     std::map<uint32_t, ChunkEntry> chunk_ht;
-
-    auto buffer = dev_ptr->Get(kBlockSize);
     uint32_t index = 0;
-    uint64_t end = off + size;
-    for (; off < end; off += kBlockSize) {
-        auto st =
-            co_await dev_ptr->Read(off, buffer.get_write(), buffer.size());
-        if (!st.OK()) {
-            LOG_ERROR("read device {} chunk meta error: {}", name, st.String());
-            s.Set(st.Code(), st.Reason());
-            co_return s;
-        }
-        for (const char* p = buffer.get(); p < buffer.get() + buffer.size();
-             p += kSectorSize) {
-            uint32_t crc = net::BigEndian::Uint32(p);
-            uint16_t len = net::BigEndian::Uint16(p + 4);
-            if (crc32_gzip_refl(0,
-                                reinterpret_cast<const unsigned char*>(p + 4),
-                                len + 2) != crc) {
-                LOG_ERROR("device {} chunk meta has invalid checksum", name);
-                s.Set(ErrCode::ErrInvalidChecksum);
-                co_return s;
-            }
 
+    auto st = co_await LoadMeta(
+        dev_ptr, off, size,
+        [&chunk_ht, &index, dev_ptr](const char* b) -> Status<> {
+            Status<> s;
             ChunkEntry chunk;
-            chunk.Unmarshal(p + 6);
+            chunk.Unmarshal(b);
             if (chunk.index != index) {
                 LOG_ERROR(
                     "device {} chunk meta has invalid index, index={} expect "
                     "index={}",
-                    name, chunk.index, index);
+                    dev_ptr->Name(), chunk.index, index);
                 s.Set(ErrCode::ErrUnExpect, "invalid index");
-                co_return s;
+                return s;
             }
             chunk_ht[index] = chunk;
             index++;
-        }
+            return s;
+        });
+    if (!st) {
+        LOG_ERROR("load chunk meta error: {} device={}", st, dev_ptr->Name());
+        s.Set(st.Code(), st.Reason());
+        co_return s;
     }
+
     s.SetValue(std::move(chunk_ht));
     co_return s;
 }
@@ -399,7 +404,7 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
 
     LOG_INFO(
         "Format device {} capacity: {} extent_meta: (start={} size={}) "
-        "chunk_meta: (start={} size={}) loga: (start={} size={}) logb: "
+        "chunk_meta: (start={} size={}) journala: (start={} size={}) journalb: "
         "(start={} size={}) data: (start={}, size={})",
         name, capacity, super_block.pt[EXTENT_PT].start,
         super_block.pt[EXTENT_PT].size, super_block.pt[CHUNK_PT].start,
