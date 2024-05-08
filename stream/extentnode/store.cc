@@ -1044,7 +1044,7 @@ seastar::future<Status<>> Store::RemoveExtent(ExtentID id) {
     Status<> s;
     auto iter = extents_.find(id);
     if (iter == extents_.end()) {
-        s.Set(ErrCode::ErrNoExtent);
+        s.Set(ErrCode::ErrExtentNotFound);
         co_return s;
     }
     auto extent_ptr = iter->second;

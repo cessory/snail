@@ -12,9 +12,9 @@ enum class ErrCode {
     //////////common error ////////
     ErrEOF = 10000,
     ErrExistExtent = 20000,
-    ErrNoExtent = 20001,
+    ErrExtentNotFound = 20001,
     ErrExtentIsWriting = 20002,
-    ErrDiskNotMatch = 20003,
+    ErrDiskNotFound = 20003,
     ErrOverWrite = 20004,
     ErrParallelWrite = 20005,
     ErrTooShort = 20007,

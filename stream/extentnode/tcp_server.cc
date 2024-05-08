@@ -11,6 +11,33 @@
 namespace snail {
 namespace stream {
 
+seastar::future<Status<>> TcpServer::SendResp(
+    const ::google::protobuf::Message* resp, ExtentnodeMsgType msgType,
+    net::Stream* stream, unsigned shard_id) {
+    size_t n = resp->ByteSizeLong();
+    TmpBuffer buf(n + kMetaMsgHeaderLen);
+    resp->SerializeToArray(buf.get_write() + kMetaMsgHeaderLen, n);
+    net::BigEndian::PutUint16(buf.get_write() + 4, (uint16_t)msgType);
+    net::BigEndian::PutUint16(buf.get_write() + 6, (uint16_t)n);
+    uint32_t crc = crc32_gzip_refl(
+        0, reinterpret_cast<const unsigned char*>(buf.get() + 4),
+        n + kMetaMsgHeaderLen - 4);
+    net::BigEndian::PutUint32(buf.get_write(), crc);
+    Status<> s;
+    if (shard_id == seastar::this_shard_id()) {
+        s = co_await stream->WriteFrame(buf.get(), buf.size());
+    } else {
+        s = co_await seastar::smp::submit_to(
+            shard_id,
+            [stream, b = buf.get(),
+             len = buf.size()]() -> seastar::future<Status<>> {
+                auto s = co_await stream->WriteFrame(b, len);
+                co_return s;
+            });
+    }
+    co_return s;
+}
+
 TcpServer::TcpServer(const std::string& host, uint16_t port,
                      const std::set<unsigned>& shards)
     : sa_(seastar::ipv4_addr(host, port)), shard_index_(0) {
@@ -153,7 +180,13 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for write",
                           ((WriteExtentReq*)req.get())->base().reqid(),
                           ((WriteExtentReq*)req.get())->diskid());
-                s.Set(EEXIST);
+                s.Set(ErrCode::ErrDiskNotFound);
+                CommonResp resp;
+                resp.set_reqid(((WriteExtentReq*)req.get())->base().reqid());
+                resp.set_code(static_cast<int>(s.Code()));
+                resp.set_reason(s.Reason());
+                co_await SendResp(&resp, WRITE_EXTENT_RESP, stream.get(),
+                                  shard);
                 co_return s;
             }
             service = it->second.get();
@@ -185,7 +218,13 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for read",
                           ((ReadExtentReq*)req.get())->base().reqid(),
                           ((ReadExtentReq*)req.get())->diskid());
-                s.Set(EEXIST);
+                s.Set(ErrCode::ErrDiskNotFound);
+                ReadExtentResp resp;
+                resp.mutable_base()->set_reqid(
+                    ((ReadExtentReq*)req.get())->base().reqid());
+                resp.mutable_base()->set_code(static_cast<int>(s.Code()));
+                resp.mutable_base()->set_reason(s.Reason());
+                co_await SendResp(&resp, READ_EXTENT_RESP, stream.get(), shard);
                 co_return s;
             }
             service = it->second.get();
@@ -219,7 +258,13 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for create extent",
                           ((CreateExtentReq*)req.get())->base().reqid(),
                           ((CreateExtentReq*)req.get())->diskid());
-                s.Set(EEXIST);
+                s.Set(ErrCode::ErrDiskNotFound);
+                CommonResp resp;
+                resp.set_reqid(((CreateExtentReq*)req.get())->base().reqid());
+                resp.set_code(static_cast<int>(s.Code()));
+                resp.set_reason(s.Reason());
+                co_await SendResp(&resp, CREATE_EXTENT_RESP, stream.get(),
+                                  shard);
                 co_return s;
             }
 
@@ -252,7 +297,13 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for delete extent",
                           ((DeleteExtentReq*)req.get())->base().reqid(),
                           ((DeleteExtentReq*)req.get())->diskid());
-                s.Set(EEXIST);
+                s.Set(ErrCode::ErrDiskNotFound);
+                CommonResp resp;
+                resp.set_reqid(((DeleteExtentReq*)req.get())->base().reqid());
+                resp.set_code(static_cast<int>(s.Code()));
+                resp.set_reason(s.Reason());
+                co_await SendResp(&resp, DELETE_EXTENT_RESP, stream.get(),
+                                  shard);
                 co_return s;
             }
 
@@ -285,7 +336,13 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for get extent",
                           ((GetExtentReq*)req.get())->base().reqid(),
                           ((GetExtentReq*)req.get())->diskid());
-                s.Set(EEXIST);
+                s.Set(ErrCode::ErrDiskNotFound);
+                GetExtentResp resp;
+                resp.mutable_base()->set_reqid(
+                    ((GetExtentReq*)req.get())->base().reqid());
+                resp.mutable_base()->set_code(static_cast<int>(s.Code()));
+                resp.mutable_base()->set_reason(s.Reason());
+                co_await SendResp(&resp, GET_EXTENT_RESP, stream.get(), shard);
                 co_return s;
             }
 
@@ -318,7 +375,14 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for update disk status",
                           ((UpdateDiskStatusReq*)req.get())->base().reqid(),
                           ((UpdateDiskStatusReq*)req.get())->diskid());
-                s.Set(EEXIST);
+                s.Set(ErrCode::ErrDiskNotFound);
+                CommonResp resp;
+                resp.set_reqid(
+                    ((UpdateDiskStatusReq*)req.get())->base().reqid());
+                resp.set_code(static_cast<int>(s.Code()));
+                resp.set_reason(s.Reason());
+                co_await SendResp(&resp, UPDATE_DISK_STATUS_RESP, stream.get(),
+                                  shard);
                 co_return s;
             }
 

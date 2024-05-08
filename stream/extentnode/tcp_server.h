@@ -34,6 +34,10 @@ class TcpServer {
     seastar::future<> Start();
 
     seastar::future<> Close();
+
+    static seastar::future<Status<>> SendResp(
+        const ::google::protobuf::Message* resp, ExtentnodeMsgType msgType,
+        net::Stream* stream, unsigned shard_id);
 };
 
 }  // namespace stream

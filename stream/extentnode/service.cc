@@ -8,38 +8,12 @@
 
 #include "proto/common.pb.h"
 #include "proto/extentnode.pb.h"
+#include "tcp_server.h"
 #include "util/logger.h"
 #include "util/util.h"
 
 namespace snail {
 namespace stream {
-
-static seastar::future<Status<>> SendResp(
-    const ::google::protobuf::Message *resp, ExtentnodeMsgType msgType,
-    net::Stream *stream, unsigned shard_id) {
-    size_t n = resp->ByteSizeLong();
-    TmpBuffer buf(n + kMetaMsgHeaderLen);
-    resp->SerializeToArray(buf.get_write() + kMetaMsgHeaderLen, n);
-    net::BigEndian::PutUint16(buf.get_write() + 4, (uint16_t)msgType);
-    net::BigEndian::PutUint16(buf.get_write() + 6, (uint16_t)n);
-    uint32_t crc = crc32_gzip_refl(
-        0, reinterpret_cast<const unsigned char *>(buf.get() + 4),
-        n + kMetaMsgHeaderLen - 4);
-    net::BigEndian::PutUint32(buf.get_write(), crc);
-    Status<> s;
-    if (shard_id == seastar::this_shard_id()) {
-        s = co_await stream->WriteFrame(buf.get(), buf.size());
-    } else {
-        s = co_await seastar::smp::submit_to(
-            shard_id,
-            [stream, b = buf.get(),
-             len = buf.size()]() -> seastar::future<Status<>> {
-                auto s = co_await stream->WriteFrame(b, len);
-                co_return s;
-            });
-    }
-    co_return s;
-}
 
 static seastar::future<Status<>> SendCommonResp(
     unsigned shard_id, net::Stream *stream, std::string_view reqid,
@@ -89,7 +63,7 @@ static seastar::future<Status<>> SendCommonResp(
     }
 
     if (resp) {
-        s = co_await SendResp(resp.get(), msgType, stream, shard_id);
+        s = co_await TcpServer::SendResp(resp.get(), msgType, stream, shard_id);
     }
     co_return s;
 }
@@ -129,7 +103,8 @@ static seastar::future<Status<>> SendReadExtentResp(unsigned shard_id,
     resp->mutable_base()->set_reqid(std::string(reqid.data(), reqid.size()));
     resp->mutable_base()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
-    auto s = co_await SendResp(resp.get(), READ_EXTENT_RESP, stream, shard_id);
+    auto s = co_await TcpServer::SendResp(resp.get(), READ_EXTENT_RESP, stream,
+                                          shard_id);
     co_return s;
 }
 
@@ -143,7 +118,8 @@ static seastar::future<Status<>> SendGetExtentResp(unsigned shard_id,
     resp->mutable_base()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
     resp->set_ctime(ctime);
-    auto s = co_await SendResp(resp.get(), READ_EXTENT_RESP, stream, shard_id);
+    auto s = co_await TcpServer::SendResp(resp.get(), READ_EXTENT_RESP, stream,
+                                          shard_id);
     co_return s;
 }
 
@@ -167,7 +143,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     }
 
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotMatch);
+        s.Set(ErrCode::ErrDiskNotFound);
         LOG_ERROR("reqid={} extent_id={}-{} diskid={} devid={} error: {}",
                   reqid, extent_id.hi, extent_id.lo, diskid, store_->DeviceId(),
                   s);
@@ -178,7 +154,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
 
     auto extent_ptr = store_->GetExtent(extent_id);
     if (!extent_ptr) {
-        s.Set(ErrCode::ErrNoExtent);
+        s.Set(ErrCode::ErrExtentNotFound);
         LOG_ERROR("reqid={} extent_id={}-{} diskid={} error: {}", reqid,
                   extent_id.hi, extent_id.lo, diskid, s.String());
         co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
@@ -424,14 +400,14 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     }
 
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotMatch);
+        s.Set(ErrCode::ErrDiskNotFound);
         s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
                                     s.Code());
         co_return s;
     }
     auto extent_ptr = store_->GetExtent(extent_id);
     if (!extent_ptr) {
-        s.Set(ErrCode::ErrNoExtent);
+        s.Set(ErrCode::ErrExtentNotFound);
         s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -566,7 +542,7 @@ seastar::future<Status<>> Service::HandleCreateExtent(
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotMatch);
+        s.Set(ErrCode::ErrDiskNotFound);
         s = co_await SendCommonResp(shard, stream, reqid, CREATE_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -593,7 +569,7 @@ seastar::future<Status<>> Service::HandleDeleteExtent(
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotMatch);
+        s.Set(ErrCode::ErrDiskNotFound);
         s = co_await SendCommonResp(shard, stream, reqid, DELETE_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -621,7 +597,7 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotMatch);
+        s.Set(ErrCode::ErrDiskNotFound);
         s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -629,7 +605,7 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
 
     auto extent_ptr = store_->GetExtent(extent_id);
     if (!extent_ptr) {
-        s.Set(ErrCode::ErrNoExtent);
+        s.Set(ErrCode::ErrExtentNotFound);
         s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -648,7 +624,7 @@ seastar::future<Status<>> Service::HandleUpdateDiskStatus(
     uint32_t diskid = req->diskid();
     uint32_t status = req->status();
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotMatch);
+        s.Set(ErrCode::ErrDiskNotFound);
         s = co_await SendCommonResp(shard, stream, reqid,
                                     UPDATE_DISK_STATUS_RESP, s.Code());
         co_return s;
