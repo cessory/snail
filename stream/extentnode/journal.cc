@@ -77,7 +77,7 @@ seastar::future<Status<>> Journal::Init(
         co_return s;
     }
     init_ = true;
-    seastar::gate::holder(gate_);
+    seastar::gate::holder holder(gate_);
     auto buf = dev_ptr_->Get(kBlockSize);
 
     uint64_t ver[2];
@@ -514,7 +514,7 @@ seastar::future<Status<>> Journal::SaveChunk(ChunkEntry chunk) {
         s = status_;
         co_return s;
     }
-    seastar::gate::holder(gate_);
+    seastar::gate::holder holder(gate_);
     std::unique_ptr<worker_item> ptr(new worker_item);
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(chunk));
     queue_.push(ptr.get());
@@ -540,7 +540,7 @@ seastar::future<Status<>> Journal::SaveExtent(ExtentEntry extent) {
         s = status_;
         co_return s;
     }
-    seastar::gate::holder(gate_);
+    seastar::gate::holder holder(gate_);
     std::unique_ptr<worker_item> ptr(new worker_item);
     ptr->entry = std::move(std::variant<ExtentEntry, ChunkEntry>(extent));
     queue_.push(ptr.get());

@@ -132,6 +132,11 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     auto diskid = req->diskid();
     uint64_t off = req->off();
     uint64_t len = req->len();
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     const std::string &eid_str = req->extent_id();
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
@@ -380,7 +385,13 @@ static seastar::future<Status<>> WriteFrames(
     co_return s;
 }
 
-seastar::future<> Service::Close() { return store_->Close(); }
+seastar::future<> Service::Close() {
+    if (!gate_.is_closed()) {
+        co_await gate_.close();
+        co_await store_->Close();
+    }
+    co_return;
+}
 
 seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
                                                     net::Stream *stream,
@@ -391,6 +402,13 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     uint32_t diskid = req->diskid();
     uint64_t off = req->off();
     uint64_t len = req->len();
+
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
         s.Set(EINVAL);
@@ -533,6 +551,11 @@ seastar::future<Status<>> Service::HandleCreateExtent(
 
     const std::string &reqid = req->base().reqid();
     uint32_t diskid = req->diskid();
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("{} parse extent id error", reqid);
@@ -560,6 +583,11 @@ seastar::future<Status<>> Service::HandleDeleteExtent(
 
     const std::string &reqid = req->base().reqid();
     uint32_t diskid = req->diskid();
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("{} parse extent id error", reqid);
@@ -588,6 +616,11 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
 
     const std::string &reqid = req->base().reqid();
     uint32_t diskid = req->diskid();
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("{} parse extent id error", reqid);
@@ -623,6 +656,11 @@ seastar::future<Status<>> Service::HandleUpdateDiskStatus(
     const std::string &reqid = req->base().reqid();
     uint32_t diskid = req->diskid();
     uint32_t status = req->status();
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     if (diskid != store_->DeviceId()) {
         s.Set(ErrCode::ErrDiskNotFound);
         s = co_await SendCommonResp(shard, stream, reqid,

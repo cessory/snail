@@ -65,7 +65,7 @@ class KernelDevice : public Device {
             s.Set(ENODEV);
             co_return s;
         }
-        seastar::gate::holder(gate_);
+        seastar::gate::holder holder(gate_);
         if ((pos & kSectorSizeMask) || (len & kSectorSizeMask) ||
             (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
             s.Set(EINVAL);
@@ -96,7 +96,7 @@ class KernelDevice : public Device {
             s.Set(ENODEV);
             co_return s;
         }
-        seastar::gate::holder(gate_);
+        seastar::gate::holder holder(gate_);
         if (pos & kSectorSizeMask) {
             s.Set(EINVAL);
             co_return s;
@@ -144,7 +144,7 @@ class KernelDevice : public Device {
             s.Set(ENODEV);
             co_return s;
         }
-        seastar::gate::holder(gate_);
+        seastar::gate::holder holder(gate_);
         if ((pos & kSectorSizeMask) || (len & kSectorSizeMask) ||
             (reinterpret_cast<uintptr_t>(b) & kMemoryAlignmentMask)) {
             s.Set(EINVAL);

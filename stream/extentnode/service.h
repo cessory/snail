@@ -2,6 +2,7 @@
 
 #include <fmt/ostream.h>
 
+#include <seastar/core/gate.hh>
 #include <seastar/core/sharded.hh>
 
 #include "net/tcp_session.h"
@@ -56,6 +57,7 @@ namespace stream {
 class Service {
     StorePtr store_;
     LRUCache<BlockCacheKey, TmpBuffer> block_cache_;
+    seastar::gate gate_;
 
    public:
     explicit Service(StorePtr store, size_t cache_capacity = 8192)
