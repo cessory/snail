@@ -3,7 +3,7 @@
 #include <limits.h>
 
 #include <seastar/core/coroutine.hh>
-#include <seastar/util/defer.hh>
+#include <seastar/core/when_all.hh>
 
 #include "byteorder.h"
 
@@ -43,7 +43,6 @@ TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
                            : dynamic_cast<BufferAllocator *>(
                                  new DefaultBufferAllocator())),
       next_id_((client ? 1 : 0)),
-      die_(false),
       accept_sem_(default_accept_backlog),
       tokens_(max_receive_buffer_) {
     if (opt.max_frame_size > kMaxFrameSize) {
@@ -64,18 +63,13 @@ SessionPtr TcpSession::make_session(
 
 seastar::future<> TcpSession::RecvLoop() {
     auto ptr = shared_from_this();
-    auto defer = seastar::defer([this] {
-        conn_->Close();
-        CloseAllStreams();
-        accept_cv_.signal();
-        w_cv_.signal();
-    });
-
     char hdr[STREAM_HEADER_SIZE];
-    while (!die_) {
+    bool break_loop = false;
+
+    while (!gate_.is_closed() && !break_loop) {
         if (tokens_ < 0) {
             co_await token_cv_.wait();
-            if (die_ || !status_.OK()) {
+            if (gate_.is_closed() || !status_.OK()) {
                 break;
             }
         }
@@ -108,11 +102,11 @@ seastar::future<> TcpSession::RecvLoop() {
                             stream);
                     try {
                         co_await accept_sem_.wait();
+                        accept_q_.emplace(stream);
+                        accept_cv_.signal();
                     } catch (std::exception &e) {
-                        co_return;
+                        break_loop = true;
                     }
-                    accept_q_.emplace(stream);
-                    accept_cv_.signal();
                 }
                 break;
             }
@@ -129,51 +123,58 @@ seastar::future<> TcpSession::RecvLoop() {
                     auto buf = allocator_->Allocate(static_cast<size_t>(len));
                     auto s = co_await conn_->ReadExactly(buf.get_write(),
                                                          buf.size());
-                    if (!s.OK()) {
-                        SetStatus(s.Code(), s.Reason());
-                        co_return;
-                    }
-                    if (s.Value() == 0) {
-                        SetStatus(static_cast<ErrCode>(ECONNABORTED));
-                        co_return;
-                    }
-                    auto it = streams_.find(f.sid);
-                    if (it != streams_.end()) {
-                        auto stream = it->second;
-                        stream->PushData(std::move(buf));
-                        tokens_ -= len;
+                    if (!s || s.Value() == 0) {
+                        if (!s) {
+                            SetStatus(s.Code(), s.Reason());
+                        } else {
+                            SetStatus(static_cast<ErrCode>(ECONNRESET));
+                        }
+                        break_loop = true;
+                    } else {
+                        auto it = streams_.find(f.sid);
+                        if (it != streams_.end()) {
+                            auto stream = it->second;
+                            stream->PushData(std::move(buf));
+                            tokens_ -= len;
+                        }
                     }
                 }
                 break;
             case CmdType::UPD:
                 if (len != 8) {
                     SetStatus(static_cast<ErrCode>(EINVAL));
-                    co_return;
+                    break_loop = true;
                 } else {
                     char buf[8];
                     auto s = co_await conn_->ReadExactly(buf, 8);
-                    if (!s.OK()) {
-                        SetStatus(s.Code(), s.Reason());
-                        co_return;
-                    }
-                    if (s.Value() == 0) {
-                        SetStatus(static_cast<ErrCode>(ECONNABORTED));
-                        co_return;
-                    }
-                    auto it = streams_.find(f.sid);
-                    if (it != streams_.end()) {
-                        auto stream = it->second;
-                        uint32_t consumed = LittleEndian::Uint32(buf);
-                        uint32_t window = LittleEndian::Uint32(&buf[4]);
-                        stream->Update(consumed, window);
+                    if (!s || s.Value() == 0) {
+                        if (!s) {
+                            SetStatus(s.Code(), s.Reason());
+                        } else {
+                            SetStatus(static_cast<ErrCode>(ECONNRESET));
+                        }
+                        break_loop = true;
+                    } else {
+                        auto it = streams_.find(f.sid);
+                        if (it != streams_.end()) {
+                            auto stream = it->second;
+                            uint32_t consumed = LittleEndian::Uint32(buf);
+                            uint32_t window = LittleEndian::Uint32(&buf[4]);
+                            stream->Update(consumed, window);
+                        }
                     }
                 }
                 break;
             default:
                 SetStatus(static_cast<ErrCode>(EINVAL));
-                co_return;
+                break_loop = true;
+                break;
         }
     }
+    conn_->Close();
+    accept_cv_.signal();
+    w_cv_.signal();
+    co_await CloseAllStreams();
     co_return;
 }
 
@@ -183,28 +184,7 @@ seastar::future<> TcpSession::SendLoop() {
     seastar::timer<seastar::steady_clock_type> write_timer;
     write_timer.set_callback([this] { conn_->Close(); });
 
-    auto defer = seastar::defer([this] {
-        conn_->Close();
-        CloseAllStreams();
-        accept_cv_.signal();
-        accept_sem_.broken();
-        token_cv_.signal();
-        SetStatus(static_cast<ErrCode>(EPIPE));
-        for (int i = 0; i < 2; i++) {
-            while (!write_q_[i].empty()) {
-                auto req = write_q_[i].front();
-                write_q_[i].pop();
-                if (req->pr.has_value()) {
-                    Status<> s = status_;
-                    req->pr.value().set_value(std::move(s));
-                } else {
-                    delete req;
-                }
-            }
-        }
-    });
-
-    while (!die_ && status_.OK()) {
+    while (!gate_.is_closed() && status_.OK()) {
         Status<> s;
         std::queue<TcpSession::write_request *> sent_q;
         seastar::net::packet packet;
@@ -258,6 +238,25 @@ seastar::future<> TcpSession::SendLoop() {
         }
     }
 
+    conn_->Close();
+    auto fu = CloseAllStreams();
+    accept_cv_.signal();
+    accept_sem_.broken();
+    token_cv_.signal();
+    SetStatus(static_cast<ErrCode>(EPIPE));
+    for (int i = 0; i < 2; i++) {
+        while (!write_q_[i].empty()) {
+            auto req = write_q_[i].front();
+            write_q_[i].pop();
+            if (req->pr.has_value()) {
+                Status<> s = status_;
+                req->pr.value().set_value(std::move(s));
+            } else {
+                delete req;
+            }
+        }
+    }
+    co_await std::move(fu);
     co_return;
 }
 
@@ -279,7 +278,7 @@ void TcpSession::ReturnTokens(uint32_t n) {
 seastar::future<Status<>> TcpSession::WriteFrameInternal(Frame f,
                                                          ClassID classid) {
     Status<> s;
-    if (die_) {
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
@@ -301,7 +300,7 @@ seastar::future<Status<>> TcpSession::WriteFrameInternal(Frame f,
 }
 
 void TcpSession::WritePing() {
-    if (die_) {
+    if (gate_.is_closed()) {
         return;
     }
     if (!status_.OK()) {
@@ -321,10 +320,11 @@ void TcpSession::WritePing() {
 
 seastar::future<Status<StreamPtr>> TcpSession::OpenStream() {
     Status<StreamPtr> s;
-    if (die_) {
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
+    seastar::gate::holder holder(gate_);
     uint32_t id = next_id_ + 2;
     if (id < next_id_) {
         s.Set(ENOSR);
@@ -343,7 +343,7 @@ seastar::future<Status<StreamPtr>> TcpSession::OpenStream() {
         s.Set(st.Code(), st.Reason());
         co_return s;
     }
-    if (die_) {
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
@@ -358,8 +358,14 @@ seastar::future<Status<StreamPtr>> TcpSession::OpenStream() {
 
 seastar::future<Status<StreamPtr>> TcpSession::AcceptStream() {
     Status<StreamPtr> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
     for (;;) {
-        if (die_) {
+        if (gate_.is_closed()) {
             s.Set(EPIPE);
             break;
         }
@@ -383,27 +389,32 @@ seastar::future<Status<StreamPtr>> TcpSession::AcceptStream() {
 }
 
 seastar::future<> TcpSession::Close() {
-    if (!die_) {
-        die_ = true;
+    if (!gate_.is_closed()) {
+        auto fu = gate_.close();
         w_cv_.signal();
         accept_sem_.broken();
         token_cv_.signal();
         accept_cv_.signal();
         keepalive_timer_.cancel();
         conn_->Close();
-        co_await send_fu_.value().then([] {});
-        co_await recv_fu_.value().then([] {});
-        CloseAllStreams();
+        co_await std::move(send_fu_.value());
+        co_await std::move(recv_fu_.value());
+        co_await CloseAllStreams();
+        co_await std::move(fu);
     }
     co_return;
 }
 
-void TcpSession::CloseAllStreams() {
+seastar::future<> TcpSession::CloseAllStreams() {
+    std::vector<seastar::future<>> fu_vec;
     for (auto &iter : streams_) {
-        iter.second->SessionClose();
+        auto fu = iter.second->SessionClose();
+        fu_vec.emplace_back(std::move(fu));
     }
     streams_.clear();
     std::queue<StreamPtr> tmp = std::move(accept_q_);
+    co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
+    co_return;
 }
 
 }  // namespace net

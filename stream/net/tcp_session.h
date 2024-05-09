@@ -4,6 +4,7 @@
 #include <queue>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -31,7 +32,7 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
     uint32_t next_id_;
 
     std::unordered_map<uint32_t, TcpStreamPtr> streams_;
-    bool die_;
+    seastar::gate gate_;
     std::optional<seastar::future<>> recv_fu_;
     std::optional<seastar::future<>> send_fu_;
 
@@ -89,7 +90,7 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
 
     void WritePing();
 
-    void CloseAllStreams();
+    seastar::future<> CloseAllStreams();
 
     friend class TcpStream;
 

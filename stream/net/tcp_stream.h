@@ -4,6 +4,7 @@
 #include <queue>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -31,7 +32,7 @@ class TcpStream : public Stream {
     size_t buffer_size_ = 0;
     seastar::condition_variable r_cv_;
     bool has_fin_ = false;
-    bool die_ = false;
+    seastar::gate gate_;
 
     uint32_t recv_bytes_ = 0;
     uint32_t sent_bytes_ = 0;
@@ -53,7 +54,7 @@ class TcpStream : public Stream {
 
     seastar::future<Status<>> SendWindowUpdate(uint32_t consumed);
 
-    void SessionClose();
+    seastar::future<> SessionClose();
 
     void Update(uint32_t consumed, uint32_t window);
 

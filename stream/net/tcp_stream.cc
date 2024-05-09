@@ -26,6 +26,11 @@ StreamPtr TcpStream::make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
 seastar::future<Status<seastar::temporary_buffer<char>>> TcpStream::ReadFrame(
     int timeout) {
     Status<seastar::temporary_buffer<char>> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     for (;;) {
         if (!buffers_.empty()) {
             auto &b = buffers_.front();
@@ -57,7 +62,7 @@ seastar::future<Status<seastar::temporary_buffer<char>>> TcpStream::ReadFrame(
 
 seastar::future<Status<>> TcpStream::WaitRead(int timeout) {
     Status<> s;
-    if (die_) {
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
@@ -81,7 +86,7 @@ seastar::future<Status<>> TcpStream::WaitRead(int timeout) {
             co_return s;
         }
     }
-    if (die_) {
+    if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
@@ -124,10 +129,11 @@ seastar::future<Status<>> TcpStream::SendWindowUpdate(uint32_t consumed) {
 seastar::future<Status<>> TcpStream::WriteFrame(std::vector<iovec> iov) {
     Status<> s;
 
-    if (die_ || has_fin_) {
+    if (gate_.is_closed() || has_fin_) {
         s.Set(EPIPE);
         co_return s;
     }
+    seastar::gate::holder holder(gate_);
 
     if (iov.size() >= IOV_MAX) {
         s.Set(EMSGSIZE);
@@ -151,7 +157,7 @@ seastar::future<Status<>> TcpStream::WriteFrame(std::vector<iovec> iov) {
     int32_t win = static_cast<int32_t>(remote_wnd_) - inflight;
     while (inflight < 0 || win <= 0) {
         co_await wnd_cv_.wait();
-        if (die_ || has_fin_) {
+        if (gate_.is_closed() || has_fin_) {
             s.Set(EPIPE);
             co_return s;
         }
@@ -198,12 +204,13 @@ void TcpStream::Update(uint32_t consumed, uint32_t window) {
     wnd_cv_.broadcast();
 }
 
-void TcpStream::SessionClose() {
-    if (!die_) {
-        die_ = true;
+seastar::future<> TcpStream::SessionClose() {
+    if (!gate_.is_closed()) {
         r_cv_.signal();
         wnd_cv_.broadcast();
+        co_await gate_.close();
     }
+    co_return;
 }
 
 std::string TcpStream::LocalAddress() const { return sess_->LocalAddress(); }
@@ -211,8 +218,8 @@ std::string TcpStream::LocalAddress() const { return sess_->LocalAddress(); }
 std::string TcpStream::RemoteAddress() const { return sess_->RemoteAddress(); }
 
 seastar::future<> TcpStream::Close() {
-    if (!die_) {
-        die_ = true;
+    if (!gate_.is_closed()) {
+        auto fu = gate_.close();
         r_cv_.signal();
         wnd_cv_.broadcast();
         Frame frame;
@@ -226,6 +233,7 @@ seastar::future<> TcpStream::Close() {
             buffer_size_ = 0;
         }
         sess_->streams_.erase(id_);
+        co_await std::move(fu);
     }
     co_return;
 }
