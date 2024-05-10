@@ -50,7 +50,6 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
     };
 
     struct write_request {
-        ClassID classid;
         Frame frame;
         std::optional<seastar::promise<Status<>>> pr;
     };
@@ -66,19 +65,19 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
     seastar::future<> SendLoop();
 
     void SetStatus(const Status<> &s) {
-        if (status_.OK()) {
+        if (status_) {
             status_ = s;
         }
     }
 
     void SetStatus(ErrCode code) {
-        if (status_.OK()) {
+        if (status_) {
             status_.Set(code);
         }
     }
 
     void SetStatus(ErrCode code, const char *reason) {
-        if (status_.OK()) {
+        if (status_) {
             status_.Set(code, reason);
         }
     }
@@ -88,9 +87,11 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
 
     seastar::future<Status<>> WriteFrameInternal(Frame f, ClassID classid);
 
-    void WritePing();
+    void WritePingPong(bool ping);
 
     seastar::future<> CloseAllStreams();
+
+    void ClearWriteq();
 
     friend class TcpStream;
 
@@ -102,9 +103,11 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
         const Option &opt, TcpConnectionPtr conn, bool client,
         std::unique_ptr<BufferAllocator> allocator = nullptr);
 
-    virtual ~TcpSession() {}
+    virtual ~TcpSession();
 
     uint64_t ID() const { return sess_id_; }
+
+    Status<> GetStatus() const { return status_; }
 
     seastar::future<Status<StreamPtr>> OpenStream();
 

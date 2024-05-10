@@ -50,6 +50,8 @@ TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
     }
 }
 
+TcpSession::~TcpSession() { ClearWriteq(); }
+
 SessionPtr TcpSession::make_session(
     const Option &opt, TcpConnectionPtr conn, bool client,
     std::unique_ptr<BufferAllocator> allocator) {
@@ -65,6 +67,13 @@ seastar::future<> TcpSession::RecvLoop() {
     auto ptr = shared_from_this();
     char hdr[STREAM_HEADER_SIZE];
     bool break_loop = false;
+    seastar::timer<seastar::steady_clock_type> ping_timer;
+    ping_timer.set_callback([this] {
+        SetStatus(static_cast<ErrCode>(ETIMEDOUT));
+        conn_->Close();
+    });
+    bool wait_ping =
+        opt_.keep_alive_enable && opt_.keep_alive_interval > 0 && client_;
 
     while (!gate_.is_closed() && !break_loop) {
         if (tokens_ < 0) {
@@ -73,8 +82,12 @@ seastar::future<> TcpSession::RecvLoop() {
                 break;
             }
         }
+        if (wait_ping) {
+            ping_timer.arm(std::chrono::seconds(3 * opt_.keep_alive_interval));
+        }
         auto s = co_await conn_->ReadExactly(hdr, STREAM_HEADER_SIZE);
-        if (!s.OK()) {
+        ping_timer.cancel();
+        if (!s) {
             SetStatus(s.Code(), s.Reason());
             break;
         }
@@ -90,7 +103,10 @@ seastar::future<> TcpSession::RecvLoop() {
             break;
         }
         switch (f.cmd) {
-            case CmdType::NOP:
+            case CmdType::PING:
+                WritePingPong(false);
+                break;
+            case CmdType::PONG:
                 break;
             case CmdType::SYN: {
                 auto it = streams_.find(f.sid);
@@ -121,8 +137,13 @@ seastar::future<> TcpSession::RecvLoop() {
             case CmdType::PSH:
                 if (len > 0) {
                     auto buf = allocator_->Allocate(static_cast<size_t>(len));
+                    if (wait_ping) {
+                        ping_timer.arm(
+                            std::chrono::seconds(3 * opt_.keep_alive_interval));
+                    }
                     auto s = co_await conn_->ReadExactly(buf.get_write(),
                                                          buf.size());
+                    ping_timer.cancel();
                     if (!s || s.Value() == 0) {
                         if (!s) {
                             SetStatus(s.Code(), s.Reason());
@@ -146,7 +167,12 @@ seastar::future<> TcpSession::RecvLoop() {
                     break_loop = true;
                 } else {
                     char buf[8];
+                    if (wait_ping) {
+                        ping_timer.arm(
+                            std::chrono::seconds(3 * opt_.keep_alive_interval));
+                    }
                     auto s = co_await conn_->ReadExactly(buf, 8);
+                    ping_timer.cancel();
                     if (!s || s.Value() == 0) {
                         if (!s) {
                             SetStatus(s.Code(), s.Reason());
@@ -182,7 +208,10 @@ seastar::future<> TcpSession::SendLoop() {
     static uint32_t max_packet_num = IOV_MAX;
     auto ptr = shared_from_this();
     seastar::timer<seastar::steady_clock_type> write_timer;
-    write_timer.set_callback([this] { conn_->Close(); });
+    write_timer.set_callback([this] {
+        SetStatus(static_cast<ErrCode>(ETIMEDOUT));
+        conn_->Close();
+    });
 
     while (!gate_.is_closed() && status_.OK()) {
         Status<> s;
@@ -227,7 +256,7 @@ seastar::future<> TcpSession::SendLoop() {
                 }
             }
 
-            if (!s.OK()) {
+            if (!s) {
                 SetStatus(s);
                 break;
             }
@@ -244,6 +273,12 @@ seastar::future<> TcpSession::SendLoop() {
     accept_sem_.broken();
     token_cv_.signal();
     SetStatus(static_cast<ErrCode>(EPIPE));
+    ClearWriteq();
+    co_await std::move(fu);
+    co_return;
+}
+
+void TcpSession::ClearWriteq() {
     for (int i = 0; i < 2; i++) {
         while (!write_q_[i].empty()) {
             auto req = write_q_[i].front();
@@ -256,13 +291,11 @@ seastar::future<> TcpSession::SendLoop() {
             }
         }
     }
-    co_await std::move(fu);
-    co_return;
 }
 
 void TcpSession::StartKeepalive() {
-    if (opt_.keep_alive_enable && client_) {
-        keepalive_timer_.set_callback([this]() { WritePing(); });
+    if (opt_.keep_alive_enable && client_ && opt_.keep_alive_interval > 0) {
+        keepalive_timer_.set_callback([this]() { WritePingPong(true); });
         keepalive_timer_.rearm_periodic(
             std::chrono::seconds(opt_.keep_alive_interval));
     }
@@ -289,7 +322,6 @@ seastar::future<Status<>> TcpSession::WriteFrameInternal(Frame f,
 
     std::unique_ptr<write_request> req(new write_request());
 
-    req->classid = classid;
     req->frame = std::move(f);
     req->pr = seastar::promise<Status<>>();
 
@@ -299,21 +331,20 @@ seastar::future<Status<>> TcpSession::WriteFrameInternal(Frame f,
     co_return s;
 }
 
-void TcpSession::WritePing() {
+void TcpSession::WritePingPong(bool ping) {
     if (gate_.is_closed()) {
         return;
     }
-    if (!status_.OK()) {
+    if (!status_) {
         return;
     }
 
     write_request *req = new write_request();
-    req->classid = ClassID::CTRL;
     req->frame.ver = 2;
-    req->frame.cmd = CmdType::NOP;
+    req->frame.cmd = ping ? CmdType::PING : CmdType::PONG;
     req->frame.sid = 0;
 
-    write_q_[static_cast<int>(ClassID::CTRL)].emplace(req);
+    write_q_[static_cast<int>(ClassID::DATA)].emplace(req);
     w_cv_.signal();
     return;
 }

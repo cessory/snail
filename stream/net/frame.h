@@ -9,8 +9,9 @@ enum CmdType {
     SYN = 0,
     FIN = 1,
     PSH = 2,
-    NOP = 3,
-    UPD = 4,
+    PING = 3,
+    PONG = 4,
+    UPD = 5,
 };
 
 // |---1---|----3----|----4---|
