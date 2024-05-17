@@ -60,6 +60,10 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
 
     seastar::future<Status<std::string>> GetLastSectorData(ExtentPtr ptr);
 
+    inline bool CanRead() { return dev_status_ <= DevStatus::RDONLY; }
+
+    inline bool CanWrite() { return dev_status_ == DevStatus::NORMAL; }
+
     friend struct Extent;
 
    public:

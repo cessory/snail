@@ -14,7 +14,6 @@ enum class ErrCode {
     ErrExistExtent = 20000,
     ErrExtentNotFound = 20001,
     ErrExtentIsWriting = 20002,
-    ErrDiskNotFound = 20003,
     ErrOverWrite = 20004,
     ErrParallelWrite = 20005,
     ErrTooShort = 20007,

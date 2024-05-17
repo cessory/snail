@@ -118,7 +118,7 @@ static seastar::future<Status<>> SendGetExtentResp(unsigned shard_id,
     resp->mutable_base()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
     resp->set_ctime(ctime);
-    auto s = co_await TcpServer::SendResp(resp.get(), READ_EXTENT_RESP, stream,
+    auto s = co_await TcpServer::SendResp(resp.get(), GET_EXTENT_RESP, stream,
                                           shard_id);
     co_return s;
 }
@@ -148,7 +148,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     }
 
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotFound);
+        s.Set(ENODEV);
         LOG_ERROR("reqid={} extent_id={}-{} diskid={} devid={} error: {}",
                   reqid, extent_id.hi, extent_id.lo, diskid, store_->DeviceId(),
                   s);
@@ -418,7 +418,7 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     }
 
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotFound);
+        s.Set(ENODEV);
         s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -565,7 +565,7 @@ seastar::future<Status<>> Service::HandleCreateExtent(
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotFound);
+        s.Set(ENODEV);
         s = co_await SendCommonResp(shard, stream, reqid, CREATE_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -597,7 +597,7 @@ seastar::future<Status<>> Service::HandleDeleteExtent(
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotFound);
+        s.Set(ENODEV);
         s = co_await SendCommonResp(shard, stream, reqid, DELETE_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -630,7 +630,9 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotFound);
+        s.Set(ENODEV);
+        LOG_ERROR("{} get extent={} error: {}, diskid={}", reqid, extent_id, s,
+                  diskid);
         s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -639,6 +641,7 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
     auto extent_ptr = store_->GetExtent(extent_id);
     if (!extent_ptr) {
         s.Set(ErrCode::ErrExtentNotFound);
+        LOG_ERROR("{} get extent={} error: {}", reqid, extent_id, s);
         s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
                                     s.Code());
         co_return s;
@@ -662,7 +665,7 @@ seastar::future<Status<>> Service::HandleUpdateDiskStatus(
     }
     seastar::gate::holder holder(gate_);
     if (diskid != store_->DeviceId()) {
-        s.Set(ErrCode::ErrDiskNotFound);
+        s.Set(ENODEV);
         s = co_await SendCommonResp(shard, stream, reqid,
                                     UPDATE_DISK_STATUS_RESP, s.Code());
         co_return s;

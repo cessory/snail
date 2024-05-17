@@ -111,7 +111,7 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
 
     auto st = co_await LoadMeta(
         dev_ptr, off, size,
-        [&extent_ht, &index, dev_ptr](const char* b) -> Status<> {
+        [&extent_ht, &index, name](const char* b) -> Status<> {
             Status<> s;
             auto extent_ptr = seastar::make_lw_shared<Extent>();
             extent_ptr->Unmarshal(b);
@@ -119,7 +119,7 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
                 LOG_ERROR(
                     "read device {} extent meta error: invalid index "
                     "index={} expect index={}",
-                    dev_ptr->Name(), extent_ptr->index, index);
+                    name, extent_ptr->index, index);
                 s.Set(ErrCode::ErrUnExpect, "invalid index");
                 return s;
             }
@@ -145,7 +145,7 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
 
     auto st = co_await LoadMeta(
         dev_ptr, off, size,
-        [&chunk_ht, &index, dev_ptr](const char* b) -> Status<> {
+        [&chunk_ht, &index, name](const char* b) -> Status<> {
             Status<> s;
             ChunkEntry chunk;
             chunk.Unmarshal(b);
@@ -153,7 +153,7 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
                 LOG_ERROR(
                     "device {} chunk meta has invalid index, index={} expect "
                     "index={}",
-                    dev_ptr->Name(), chunk.index, index);
+                    name, chunk.index, index);
                 s.Set(ErrCode::ErrUnExpect, "invalid index");
                 return s;
             }
@@ -175,6 +175,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
                                       size_t cache_cap) {
     StorePtr store = seastar::make_lw_shared<Store>(cache_cap);
     DevicePtr dev_ptr;
+    LOG_INFO("load device={}...", name);
     if (!spdk_nvme) {
         dev_ptr = co_await OpenKernelDevice(name);
     } else {
@@ -186,8 +187,8 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
 
     auto tmp = dev_ptr->Get(kSectorSize);
     auto s = co_await dev_ptr->Read(0, tmp.get_write(), tmp.size());
-    if (!s.OK()) {
-        LOG_ERROR("read device {} superblock error: {}", name, s.String());
+    if (!s) {
+        LOG_ERROR("read device {} superblock error: {}", name, s);
         co_await dev_ptr->Close();
         co_return nullptr;
     }
@@ -311,7 +312,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
     for (auto iter = chunk_ht.begin(); iter != chunk_ht.end(); ++iter) {
         store->free_chunks_.push(iter->second.index);
     }
-
+    LOG_INFO("load device={} success...", name);
     co_return store;
 }
 
@@ -789,10 +790,16 @@ seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
                                        std::vector<iovec> iov) {
     Status<> s;
     if (offset != extent_ptr->len) {
-        LOG_ERROR("extent({}-{}) is over write, offset={} len={}",
-                  extent_ptr->id.hi, extent_ptr->id.lo, offset,
-                  extent_ptr->len);
+        LOG_ERROR("extent={} is over write, offset={} len={}", extent_ptr->id,
+                  offset, extent_ptr->len);
         s.Set(ErrCode::ErrOverWrite);
+        co_return s;
+    }
+
+    if (!CanWrite()) {
+        LOG_ERROR("extent={} cann't write, device status={}", extent_ptr->id,
+                  static_cast<int>(dev_status_));
+        s.Set(dev_status_ == DevStatus::BROKEN ? EIO : EROFS);
         co_return s;
     }
 
@@ -941,14 +948,19 @@ seastar::future<Status<std::vector<TmpBuffer>>> Store::Read(
         s.Set(EINVAL);
         co_return s;
     }
+    if (!CanRead()) {
+        LOG_ERROR("device cann't read data, status={}",
+                  static_cast<int>(dev_status_));
+        s.Set(EIO);
+        co_return s;
+    }
     if (len == 0) {
         co_return s;
     }
 
     if (off + len > extent_ptr->len) {
-        LOG_ERROR("len={} is out of range off={}, extent={}-{} extent len={}",
-                  len, off, extent_ptr->id.hi, extent_ptr->id.lo,
-                  extent_ptr->len);
+        LOG_ERROR("len={} is out of range off={}, extent={} extent len={}", len,
+                  off, extent_ptr->id, extent_ptr->len);
         s.Set(ERANGE);
         co_return s;
     }
@@ -984,18 +996,17 @@ seastar::future<Status<std::vector<TmpBuffer>>> Store::Read(
         auto st = co_await dev_ptr_->Read(phy_disk_off, buf.get_write(),
                                           need_read_bytes);
         if (!st) {
-            LOG_ERROR(
-                "read extent error: {}, extent={}-{} off={} chunk index={}",
-                st.String(), extent_ptr->id.hi, extent_ptr->id.lo, off, i);
+            LOG_ERROR("read extent error: {}, extent={} off={} chunk index={}",
+                      st.String(), extent_ptr->id, off, i);
             s.Set(st.Code(), st.Reason());
             co_return s;
         }
         chunk_off = 0;
         if (st.Value() != need_read_bytes) {
             LOG_ERROR(
-                "read extent error: unexpect bytes, extent={}-{} off={} chunk "
+                "read extent error: unexpect bytes, extent={} off={} chunk "
                 "index={}",
-                extent_ptr->id.hi, extent_ptr->id.lo, off, i);
+                extent_ptr->id, off, i);
             s.Set(ErrCode::ErrUnExpect, "read unexcept bytes");
             co_return s;
         }

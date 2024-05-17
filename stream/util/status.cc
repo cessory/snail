@@ -10,7 +10,6 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::ErrExistExtent, "extent has already exist"},
     {ErrCode::ErrExtentNotFound, "not found extent"},
     {ErrCode::ErrExtentIsWriting, "extent is writing"},
-    {ErrCode::ErrDiskNotFound, "disk not found"},
     {ErrCode::ErrOverWrite, "write disk error"},
     {ErrCode::ErrParallelWrite, "parallel write extent"},
     {ErrCode::ErrTooShort, "data too short"},

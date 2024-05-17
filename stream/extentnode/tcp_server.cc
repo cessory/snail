@@ -180,7 +180,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for write",
                           ((WriteExtentReq*)req.get())->base().reqid(),
                           ((WriteExtentReq*)req.get())->diskid());
-                s.Set(ErrCode::ErrDiskNotFound);
+                s.Set(ENODEV);
                 CommonResp resp;
                 resp.set_reqid(((WriteExtentReq*)req.get())->base().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
@@ -218,7 +218,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for read",
                           ((ReadExtentReq*)req.get())->base().reqid(),
                           ((ReadExtentReq*)req.get())->diskid());
-                s.Set(ErrCode::ErrDiskNotFound);
+                s.Set(ENODEV);
                 ReadExtentResp resp;
                 resp.mutable_base()->set_reqid(
                     ((ReadExtentReq*)req.get())->base().reqid());
@@ -258,7 +258,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for create extent",
                           ((CreateExtentReq*)req.get())->base().reqid(),
                           ((CreateExtentReq*)req.get())->diskid());
-                s.Set(ErrCode::ErrDiskNotFound);
+                s.Set(ENODEV);
                 CommonResp resp;
                 resp.set_reqid(((CreateExtentReq*)req.get())->base().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
@@ -297,7 +297,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for delete extent",
                           ((DeleteExtentReq*)req.get())->base().reqid(),
                           ((DeleteExtentReq*)req.get())->diskid());
-                s.Set(ErrCode::ErrDiskNotFound);
+                s.Set(ENODEV);
                 CommonResp resp;
                 resp.set_reqid(((DeleteExtentReq*)req.get())->base().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
@@ -336,7 +336,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for get extent",
                           ((GetExtentReq*)req.get())->base().reqid(),
                           ((GetExtentReq*)req.get())->diskid());
-                s.Set(ErrCode::ErrDiskNotFound);
+                s.Set(ENODEV);
                 GetExtentResp resp;
                 resp.mutable_base()->set_reqid(
                     ((GetExtentReq*)req.get())->base().reqid());
@@ -375,7 +375,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 LOG_ERROR("reqid={} not found disk={} for update disk status",
                           ((UpdateDiskStatusReq*)req.get())->base().reqid(),
                           ((UpdateDiskStatusReq*)req.get())->diskid());
-                s.Set(ErrCode::ErrDiskNotFound);
+                s.Set(ENODEV);
                 CommonResp resp;
                 resp.set_reqid(
                     ((UpdateDiskStatusReq*)req.get())->base().reqid());
