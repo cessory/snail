@@ -101,3 +101,11 @@
         abort();                                                     \
     } while (0)
 
+#define LOG_FATAL_THROW(...)                                         \
+    do {                                                             \
+        spdlog::default_logger_raw()->log(                           \
+            spdlog::source_loc{__FILE__, __LINE__, SPDLOG_FUNCTION}, \
+            spdlog::level::critical, __VA_ARGS__);                   \
+        throw std::runtime_error(fmt::format(__VA_ARGS__));          \
+    } while (0)
+

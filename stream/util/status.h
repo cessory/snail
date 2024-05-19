@@ -19,6 +19,13 @@ enum class ErrCode {
     ErrTooShort = 20007,
     ErrTooLarge = 20008,
     ErrInvalidChecksum = 20010,
+
+    ///////////raft error///////////
+    ErrRaftCompacted = 21000,
+    ErrRaftUnavailable = 21001,
+    ErrRaftSnapOutOfData = 21002,
+    ErrRaftUnvalidata = 21003,
+    ErrRaftConfChange = 21004,
     ErrUnExpect = 29999
 };
 

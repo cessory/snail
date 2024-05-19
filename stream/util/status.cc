@@ -15,6 +15,15 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::ErrTooShort, "data too short"},
     {ErrCode::ErrTooLarge, "data too larger"},
     {ErrCode::ErrInvalidChecksum, "invalid checksum"},
+
+    ////////raft error/////////////
+    {ErrCode::ErrRaftCompacted,
+     "requested index is unavailable due to compaction"},
+    {ErrCode::ErrRaftUnavailable, "requested entry at index is unavailable"},
+    {ErrCode::ErrRaftSnapOutOfData,
+     "requested index is older than the existing snapshot"},
+    {ErrCode::ErrRaftUnvalidata, "raft config is unvalidate"},
+    {ErrCode::ErrRaftConfChange, "invalid confchange"},
     {ErrCode::ErrUnExpect, "unexpect error"},
 };
 
