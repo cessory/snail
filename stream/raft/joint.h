@@ -1,4 +1,6 @@
 #pragma once
+#include <seastar/util/noncopyable_function.hh>
+
 #include "majority.h"
 
 namespace snail {
@@ -10,7 +12,7 @@ std::unordered_set<uint64_t> IDs(const JointConfig& cfg);
 
 uint64_t CommittedIndex(
     const JointConfig& cfg,
-    std::function<std::tuple<uint64_t, bool>(uint64_t)> const& fn);
+    seastar::noncopyable_function<std::tuple<uint64_t, bool>(uint64_t)>&& fn);
 
 VoteResult GetVoteResult(const JointConfig& cfg,
                          const std::unordered_map<uint64_t, bool>& votes);

@@ -24,6 +24,12 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
      "requested index is older than the existing snapshot"},
     {ErrCode::ErrRaftUnvalidata, "raft config is unvalidate"},
     {ErrCode::ErrRaftConfChange, "invalid confchange"},
+    {ErrCode::ErrRaftConfStates, "ConfStates not equivalent"},
+    {ErrCode::ErrRaftSnapshotTemporarilyUnavailable,
+     "snapshot is temporarily unavailable"},
+    {ErrCode::ErrRaftProposalDropped, "raft proposal dropped"},
+    {ErrCode::ErrRaftTransfering, "raft is transfering leadership"},
+    {ErrCode::ErrRaftIslearner, "node is learner"},
     {ErrCode::ErrUnExpect, "unexpect error"},
 };
 

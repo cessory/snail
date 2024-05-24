@@ -26,6 +26,11 @@ enum class ErrCode {
     ErrRaftSnapOutOfData = 21002,
     ErrRaftUnvalidata = 21003,
     ErrRaftConfChange = 21004,
+    ErrRaftConfStates = 21005,
+    ErrRaftSnapshotTemporarilyUnavailable = 21006,
+    ErrRaftProposalDropped = 21007,
+    ErrRaftTransfering = 21008,
+    ErrRaftIslearner = 21009,
     ErrUnExpect = 29999
 };
 

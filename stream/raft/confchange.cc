@@ -57,61 +57,62 @@ toConfChangeSingle(const ConfState& cs) {
                                                           std::move(in));
 }
 
-std::tuple<TrackerConfig, ProgressMap, int> Changer::EnterJoint(
+Status<std::tuple<TrackerConfig, ProgressMap>> Changer::EnterJoint(
     bool auto_leave, const std::vector<ConfChangeSingle>& ccs) {
+    Status<std::tuple<TrackerConfig, ProgressMap>> s;
     TrackerConfig cfg;
     ProgressMap prs;
     int err;
-    auto res = CheckAndCopy();
-    std::tie(cfg, prs, err) = res;
-    if (err != RAFT_OK) {
-        return std::make_tuple(cfg, prs, err);
+    auto st = CheckAndCopy();
+    if (!st) {
+        s.Set(st.Code());
+        return s;
     }
+    std::tie(cfg, prs) = st.Value();
     if (joint(cfg)) {
-        RAFT_LOG_ERROR(logger_, "[{}-{}] config is already joint", group_, id_);
-        return std::make_tuple(TrackerConfig(), ProgressMap(),
-                               RAFT_ERR_CONFCHANGE);
+        LOG_ERROR("[{}-{}] config is already joint", group_, id_);
+        s.Set(ErrCode::ErrRaftConfChange);
+        return s;
     }
 
     if (cfg.voters()[0].empty()) {
-        RAFT_LOG_ERROR(logger_, "[{}-{}] can't make a zero-voter config joint",
-                       group_, id_);
-        return std::make_tuple(TrackerConfig(), ProgressMap(),
-                               RAFT_ERR_CONFCHANGE);
+        LOG_ERROR("[{}-{}] can't make a zero-voter config joint", group_, id_);
+        s.Set(ErrCode::ErrRaftConfChange);
+        return s;
     }
     cfg.voters()[1].clear();
     cfg.voters()[1] = cfg.voters()[0];
 
     auto st1 = Apply(&cfg, prs, ccs);
     if (!st1) {
-        return std::make_tuple(TrackerConfig(), ProgressMap(),
-                               RAFT_ERR_CONFCHANGE);
+        s.Set(ErrCode::ErrRaftConfChange);
+        return s;
     }
     cfg.set_auto_leave(auto_leave);
     return CheckAndReturn(std::move(cfg), std::move(prs));
 }
 
-std::tuple<TrackerConfig, ProgressMap, int> Changer::LeaveJoint() {
+Status<std::tuple<TrackerConfig, ProgressMap>> Changer::LeaveJoint() {
+    Status<std::tuple<TrackerConfig, ProgressMap>> s;
     TrackerConfig cfg;
     ProgressMap prs;
     int err;
-    auto res = CheckAndCopy();
-    if (err != RAFT_OK) {
-        return std::make_tuple(cfg, prs, err);
+    auto st = CheckAndCopy();
+    if (!st) {
+        s = st;
+        return s;
     }
 
     if (!joint(cfg)) {
-        RAFT_LOG_ERROR(logger_, "[{}-{}] can't leave a non-joint config",
-                       group_, id_);
-        return std::make_tuple(TrackerConfig(), ProgressMap(),
-                               RAFT_ERR_CONFCHANGE);
+        LOG_ERROR("[{}-{}] can't leave a non-joint config", group_, id_);
+        s.Set(ErrCode::ErrRaftConfChange);
+        return s;
     }
 
     if (cfg.voters()[1].empty()) {
-        RAFT_LOG_ERROR(logger_, "[{}-{}] configuration is not joint", group_,
-                       id_);
-        return std::make_tuple(TrackerConfig(), ProgressMap(),
-                               RAFT_ERR_CONFCHANGE);
+        LOG_ERROR("[{}-{}] configuration is not joint", group_, id_);
+        s.Set(ErrCode::ErrRaftConfChange);
+        return s;
     }
     for (auto& id : cfg.learners_next()) {
         cfg.learners().insert(id);
@@ -308,28 +309,30 @@ Status<std::tuple<TrackerConfig, ProgressMap>> Changer::Restore(
 
     if (outgoing.empty()) {
         // No outgoing config, so just apply the incoming changes one by one.
-        auto err = fn(incoming);
-        if (err != RAFT_OK) {
-            return std::make_tuple(TrackerConfig(), ProgressMap(), err);
+        auto st = fn(incoming);
+        if (!st) {
+            s.Set(st.Code());
+            return s;
         }
         TrackerConfig* pcfg = dynamic_cast<TrackerConfig*>(tracker_.get());
         cfg = *pcfg;
         prs = tracker_->progress();
-        return std::make_tuple(std::move(cfg), std::move(prs), err);
+        s.SetValue(std::make_tuple(std::move(cfg), std::move(prs)));
+        return s;
     }
-    auto err = fn(outgoing);
-    if (err != RAFT_OK) {
-        return std::make_tuple(TrackerConfig(), ProgressMap(), err);
+    auto st = fn(outgoing);
+    if (!st) {
+        s.Set(st.Code());
+        return s;
     }
 
-    auto res = EnterJoint(cs.auto_leave(), incoming);
-    std::tie(cfg, prs, err) = res;
-    if (err != RAFT_OK) {
-        return std::make_tuple(TrackerConfig(), ProgressMap(), err);
+    s = EnterJoint(cs.auto_leave(), incoming);
+    if (!s) {
+        return s;
     }
     tracker_->set_config(cfg);
     tracker_->set_progress(prs);
-    return std::make_tuple(std::move(cfg), std::move(prs), err);
+    return s;
 }
 
 Status<> Changer::CheckInvariants(const TrackerConfig& cfg,

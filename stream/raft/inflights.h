@@ -3,40 +3,40 @@
 #include <cstdint>
 #include <vector>
 
-#include "common/macro.h"
+#include "util/util.h"
 
 namespace snail {
 namespace raft {
 
 class Inflights {
-  SNAIL_PRIVATE
+    SNAIL_PRIVATE
 
-  size_t head_;
-  size_t tail_;
-  size_t count_;
+    size_t head_;
+    size_t tail_;
+    size_t count_;
 
-  // buffer contains the index of the last entry
-  // inside one message.
-  std::vector<uint64_t> buffer_;
+    // buffer contains the index of the last entry
+    // inside one message.
+    std::vector<uint64_t> buffer_;
 
- public:
-  explicit Inflights(size_t size);
+   public:
+    explicit Inflights(size_t size);
 
-  Inflights(const Inflights& x);
+    Inflights(const Inflights& x);
 
-  Inflights& operator=(const Inflights& x);
+    Inflights& operator=(const Inflights& x);
 
-  void Add(uint64_t inflight);
+    void Add(uint64_t inflight);
 
-  bool Full();
+    bool Full();
 
-  size_t Count();
+    size_t Count();
 
-  void Reset();
+    void Reset();
 
-  void FreeFirstOne();
+    void FreeFirstOne();
 
-  void FreeLE(uint64_t to);
+    void FreeLE(uint64_t to);
 };
 
 }  // namespace raft

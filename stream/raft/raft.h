@@ -3,13 +3,13 @@
 #include <optional>
 #include <random>
 
-#include "common/macro.h"
 #include "confchange.h"
 #include "progress.h"
 #include "raft_log.h"
 #include "raft_proto.h"
 #include "read_only.h"
 #include "tracker.h"
+#include "util/util.h"
 
 namespace snail {
 namespace raft {
@@ -19,24 +19,43 @@ struct SoftState {
     RaftState raft_state;
 };
 
-struct Ready {
-    std::optional<SoftState> st;
-    HardState hs;
-    std::vector<ReadState> rss;
-    std::vector<EntryPtr> entries;  // can't move, but entry data can moveing
-    SnapshotPtr snapshot;
-    std::vector<EntryPtr>
-        committed_entries;         // can't move include entry and entry data
-    std::vector<MessagePtr> msgs;  // can move
-    bool sync = false;
+class Raft;
 
+class Ready {
+    std::optional<SoftState> st_;
+    HardState hs_;
+    std::vector<ReadState> rss_;
+    std::vector<EntryPtr> entries_;  // can't move, but entry data can moveing
+    SnapshotPtr snapshot_;
+    std::vector<EntryPtr>
+        committed_entries_;         // can't move include entry and entry data
+    std::vector<MessagePtr> msgs_;  // can move
+    bool sync_ = false;
+
+   public:
+    friend class Raft;
     Ready() = default;
+
+    std::optional<SoftState> GetSoftState() { return st_; }
+
+    HardState GetHardState() { return hs_; }
+
+    const std::vector<ReadState>& GetReadStates() { return rss_; }
+
+    std::vector<EntryPtr> GetEntries() { return entries_; }
+
+    SnapshotPtr GetSnapshot() { return snapshot_; }
+
+    std::vector<EntryPtr> GetCommittedEntries() { return committed_entries_; }
+
+    const std::vector<MessagePtr>& GetSendMsgs() { return msgs_; }
+
+    bool IsSync() { return sync_; }
 };
 
 using ReadyPtr = seastar::lw_shared_ptr<Ready>;
 
 class RawNode;
-class Node;
 
 class Raft {
     SNAIL_PRIVATE
@@ -65,8 +84,8 @@ class Raft {
     int election_timeout_;
     int randomized_election_timeout_;
     bool disable_proposal_forwarding_;
-    std::function<seastar::future<>()> tick_;
-    std::function<seastar::future<int>(MessagePtr)> step_;
+    std::function<seastar::future<Status<>>()> tick_;
+    std::function<seastar::future<Status<>>(MessagePtr)> step_;
     std::vector<MessagePtr> pending_readindex_messages_;
     std::default_random_engine e_;
     std::optional<std::uniform_int_distribution<int>> dist_;
@@ -95,7 +114,7 @@ class Raft {
 
     seastar::future<Status<>> Init(const Config c);
 
-    seastar::future<int> Step(MessagePtr m);
+    seastar::future<Status<>> Step(MessagePtr m);
 
     seastar::future<ConfState> ApplyConfChange(ConfChangeV2 cc);
 
@@ -113,7 +132,7 @@ class Raft {
 
     seastar::future<bool> MaybeCommit();
 
-    seastar::future<> BcastAppend();
+    seastar::future<Status<>> BcastAppend();
 
     void BcastHeartbeat();
 
@@ -121,7 +140,7 @@ class Raft {
 
     void SendHeartbeat(uint64_t to, const seastar::sstring& ctx);
 
-    seastar::future<> SendAppend(uint64_t to);
+    seastar::future<Status<>> SendAppend(uint64_t to);
 
     seastar::future<bool> MaybeSendAppend(uint64_t to, bool send_if_empty);
 
@@ -137,39 +156,39 @@ class Raft {
 
     void BecomeCandidate();
 
-    seastar::future<> BecomeLeader();
+    seastar::future<Status<>> BecomeLeader();
 
     void Reset(uint64_t term);
 
     void ResetRandomizedElectionTimeout();
 
-    seastar::future<> TickElection();
+    seastar::future<Status<>> TickElection();
 
-    seastar::future<> TickHeartbeat();
+    seastar::future<Status<>> TickHeartbeat();
 
-    seastar::future<int> StepLeader(MessagePtr m);
+    seastar::future<Status<>> StepLeader(MessagePtr m);
 
-    seastar::future<int> StepFollower(MessagePtr m);
+    seastar::future<Status<>> StepFollower(MessagePtr m);
 
-    seastar::future<int> StepCandidate(MessagePtr m);
+    seastar::future<Status<>> StepCandidate(MessagePtr m);
 
     bool Promotable();
 
     bool PastElectionTimeout();
 
-    seastar::future<> HandleAppendEntries(MessagePtr m);
+    seastar::future<Status<>> HandleAppendEntries(MessagePtr m);
 
     void HandleHeartbeat(MessagePtr m);
 
-    seastar::future<> HandleSnapshot(MessagePtr m);
+    seastar::future<Status<>> HandleSnapshot(MessagePtr m);
 
     seastar::future<bool> Restore(SnapshotPtr s);
 
-    seastar::future<> Hup(CampaignType t);
+    seastar::future<Status<>> Hup(CampaignType t);
 
     int NumOfPendingConf(const std::vector<EntryPtr>& ents);
 
-    seastar::future<> Campaign(CampaignType t);
+    seastar::future<Status<>> Campaign(CampaignType t);
 
     std::tuple<int, int, VoteResult> Poll(uint64_t id, MessageType t, bool v);
 
@@ -183,11 +202,11 @@ class Raft {
 
     void SendMsgReadIndexResponse(MessagePtr m);
 
-    seastar::future<> ReleasePendingReadIndexMessages();
+    seastar::future<Status<>> ReleasePendingReadIndexMessages();
 
     void SendTimeoutNow(uint64_t to);
 
-    seastar::future<> Advance(ReadyPtr rd);
+    seastar::future<Status<>> Advance(ReadyPtr rd);
 };
 
 using RaftPtr = seastar::lw_shared_ptr<Raft>;

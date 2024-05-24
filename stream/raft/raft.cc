@@ -42,7 +42,7 @@ seastar::future<Status<>> Raft::Init(const Config c) {
         c.max_committed_size_per_ready == 0 ? c.max_size_per_msg
                                             : c.max_committed_size_per_ready;
     raft_log_ = RaftLog::MakeRaftLog(c.storage, max_committed_size_per_ready,
-                                     logger_, c.group, c.id);
+                                     c.group, c.id);
 
     HardState hs;
     ConfState cs;
@@ -72,19 +72,21 @@ seastar::future<Status<>> Raft::Init(const Config c) {
     dist_ = std::make_optional<std::uniform_int_distribution<int>>(
         0, election_timeout_ - 1);
 
-    Changer chg(raft_log_->LastIndex(), prs_, logger_, group_, id_);
+    Changer chg(raft_log_->LastIndex(), prs_, group_, id_);
     TrackerConfig cfg;
     ProgressMap prs;
 
-    auto r = chg.Restore(cs);
-    std::tie(cfg, prs, err) = r;
-    if (err != RAFT_OK) {
-        co_return err;
+    auto st = chg.Restore(cs);
+    if (!st) {
+        s.Set(st.Code());
+        co_return s;
     }
+    std::tie(cfg, prs) = st.Value();
 
     auto cs1 = co_await SwitchToConfig(cfg, prs);
     if (cs != cs1) {
-        co_return RAFT_ERR_CONFSTATES;
+        s.Set(ErrCode::ErrRaftConfStates);
+        co_return s;
     }
 
     if (!hs.Empty()) {
@@ -103,7 +105,7 @@ seastar::future<Status<>> Raft::Init(const Config c) {
         group_, id_, fmt::join(prs_->VoterNodes(), ","), term_,
         raft_log_->committed(), raft_log_->applied(), raft_log_->LastIndex(),
         last_term);
-    co_return RAFT_OK;
+    co_return s;
 }
 
 SoftState Raft::GetSoftState() {
@@ -119,9 +121,9 @@ HardState Raft::GetHardState() {
 void Raft::LoadState(const HardState& hs) {
     if (hs.commit() < raft_log_->committed() ||
         hs.commit() > raft_log_->LastIndex()) {
-        RAFT_LOG_FATAL(
-            logger_, "[{}-{}] state.commit {} is out of range [{}, {}]", group_,
-            id_, hs.commit(), raft_log_->committed(), raft_log_->LastIndex());
+        LOG_FATAL_THROW("[{}-{}] state.commit {} is out of range [{}, {}]",
+                        group_, id_, hs.commit(), raft_log_->committed(),
+                        raft_log_->LastIndex());
     }
     raft_log_->set_committed(hs.commit());
     term_ = hs.term();
@@ -130,41 +132,36 @@ void Raft::LoadState(const HardState& hs) {
 
 bool Raft::Validate(const Raft::Config& c) {
     if (c.id == 0) {
-        RAFT_LOG_ERROR(logger_, "cannot use 0 as id");
+        LOG_ERROR("cannot use 0 as id");
         return false;
     }
 
     if (c.heartbeat_tick <= 0) {
-        RAFT_LOG_ERROR(logger_, "[{}-{}] heartbeat tick must be greater than 0",
-                       c.group, c.id);
+        LOG_ERROR("[{}-{}] heartbeat tick must be greater than 0", c.group,
+                  c.id);
         return false;
     }
 
     if (c.election_tick <= c.heartbeat_tick) {
-        RAFT_LOG_ERROR(
-            logger_,
-            "[{}-{}] election tick must be greater than heartbeat tick",
-            c.group, c.id);
+        LOG_ERROR("[{}-{}] election tick must be greater than heartbeat tick",
+                  c.group, c.id);
         return false;
     }
 
     if (!c.storage) {
-        RAFT_LOG_ERROR(logger_, "[{}-{}] storage cannot be null", c.group,
-                       c.id);
+        LOG_ERROR("[{}-{}] storage cannot be null", c.group, c.id);
         return false;
     }
 
     if (c.max_inflight_msgs <= 0) {
-        RAFT_LOG_ERROR(logger_,
-                       "[{}-{}] max inflight messages must be greater than 0",
-                       c.group, c.id);
+        LOG_ERROR("[{}-{}] max inflight messages must be greater than 0",
+                  c.group, c.id);
         return false;
     }
 
     if (c.read_only_option == ReadOnlyOption::ReadOnlyLeaseBased &&
         !c.check_quorum) {
-        RAFT_LOG_ERROR(
-            logger_,
+        LOG_ERROR(
             "[{}-{}] CheckQuorum must be enabled when ReadOnlyOption is "
             "ReadOnlyLeaseBased",
             c.group, c.id);
@@ -178,8 +175,7 @@ seastar::future<ConfState> Raft::SwitchToConfig(TrackerConfig cfg,
     prs_->set_config(cfg);
     prs_->set_progress(prs);
 
-    RAFT_LOG_INFO(logger_, "[{}-{}] switched to configuration {}", group_, id_,
-                  cfg.String());
+    LOG_INFO("[{}-{}] switched to configuration {}", group_, id_, cfg);
     auto cs = prs_->GetConfState();
 
     auto iter = prs_->progress().find(id_);
@@ -201,9 +197,9 @@ seastar::future<ConfState> Raft::SwitchToConfig(TrackerConfig cfg,
         co_await BcastAppend();
     } else {
         co_await prs_->AsyncVisit(
-            [this](uint64_t id, ProgressPtr pr) -> seastar::future<> {
-                return MaybeSendAppend(id, false).then(
-                    [](bool) { return seastar::make_ready_future<>(); });
+            [this](uint64_t id, ProgressPtr pr) -> seastar::future<Status<>> {
+                co_await MaybeSendAppend(id, false);
+                co_return Status<>();
             });
     }
 
@@ -224,11 +220,11 @@ seastar::future<bool> Raft::MaybeCommit() {
     return raft_log_->MaybeCommit(mci, term_);
 }
 
-seastar::future<> Raft::BcastAppend() {
+seastar::future<Status<>> Raft::BcastAppend() {
     return prs_->AsyncVisit(
-        [this](uint64_t id, ProgressPtr pr) -> seastar::future<> {
+        [this](uint64_t id, ProgressPtr pr) -> seastar::future<Status<>> {
             if (id_ == id) {
-                return seastar::make_ready_future();
+                return seastar::make_ready_future(Status<>());
             }
             return SendAppend(id);
         });
@@ -262,16 +258,16 @@ void Raft::SendHeartbeat(uint64_t to, const seastar::sstring& ctx) {
     Send(msg);
 }
 
-seastar::future<> Raft::SendAppend(uint64_t to) {
+seastar::future<Status<>> Raft::SendAppend(uint64_t to) {
     co_await MaybeSendAppend(to, true);
-    co_return;
+    co_return Status<>();
 }
 
 seastar::future<bool> Raft::MaybeSendAppend(uint64_t to, bool send_if_empty) {
     auto iter = prs_->progress().find(to);
     if (iter == prs_->progress().end()) {
-        RAFT_LOG_FATAL(logger_, "[{}-{}] not found {} in progress map", group_,
-                       id_, to);
+        LOG_FATAL_THROW("[{}-{}] not found {} in progress map", group_, id_,
+                        to);
     }
 
     auto pr = iter->second;
@@ -281,56 +277,50 @@ seastar::future<bool> Raft::MaybeSendAppend(uint64_t to, bool send_if_empty) {
 
     MessagePtr m = seastar::make_lw_shared<Message>();
     m->to = to;
-    auto r = co_await raft_log_->Term(pr->next() - 1);
-    auto r1 = co_await raft_log_->Entries(pr->next(), max_msg_size_);
+    auto s1 = co_await raft_log_->Term(pr->next() - 1);
+    auto s2 = co_await raft_log_->Entries(pr->next(), max_msg_size_);
 
-    if (r1.val.size() == 0 && !send_if_empty) {
+    if (s2.Value().size() == 0 && !send_if_empty) {
         co_return false;
     }
 
-    if (r.err || r1.err) {
+    if (!s1 || !s2) {
         if (!pr->recent_active()) {
-            RAFT_LOG_DEBUG(
-                logger_,
+            LOG_DEBUG(
                 "[{}-{}] ignore sending snapshot to {} since it is not "
                 "recently active",
                 group_, id_, to);
             co_return false;
         }
         m->type = MessageType::MsgSnap;
-        auto sr = co_await raft_log_->Snapshot();
-        if (sr.err) {
-            if (sr.err == RAFT_ERR_SNAPSHOTTEMPORARILYUNAVAILABLE) {
-                RAFT_LOG_DEBUG(
-                    logger_,
+        auto s3 = co_await raft_log_->Snapshot();
+        if (!s3) {
+            if (s3.Code() == ErrCode::ErrRaftSnapshotTemporarilyUnavailable) {
+                LOG_DEBUG(
                     "[{}-{}] failed to send snapshot to {} because snapshot "
                     "is temporarily unavailable",
                     group_, id_, to);
                 co_return false;
             }
-            RAFT_LOG_FATAL(logger_,
-                           "[{}-{}] failed to send snapshot to {} because {}",
-                           group_, id_, to, raft_error(sr.err));
+            LOG_FATAL_THROW("[{}-{}] failed to send snapshot to {} because {}",
+                            group_, id_, to, s3);
         }
 
-        SnapshotPtr snapshot = sr.val;
+        SnapshotPtr snapshot = s3.Value();
         if (snapshot->metadata().index() == 0) {
-            RAFT_LOG_FATAL(logger_, "[{}-{}] need non-empty snapshot", group_,
-                           id_);
+            LOG_FATAL_THROW("[{}-{}] need non-empty snapshot", group_, id_);
         }
         m->snapshot = snapshot;
         auto sindex = snapshot->metadata().index();
         auto sterm = snapshot->metadata().term();
-        RAFT_LOG_DEBUG(
-            logger_,
+        LOG_DEBUG(
             "[{}-{}] [firstindex: {}, commit: {}] sent snapshot[index: "
             "{}, term: {}] to {} [{}]",
             group_, id_, raft_log_->FirstIndex(), raft_log_->committed(),
-            sindex, sterm, to, pr->String());
+            sindex, sterm, to, *pr);
         pr->BecomeSnapshot(sindex);
-        RAFT_LOG_DEBUG(logger_,
-                       "[{}-{}] paused sending replication messages to {} [{}]",
-                       group_, id_, to, pr->String());
+        LOG_DEBUG("[{}-{}] paused sending replication messages to {} [{}]",
+                  group_, id_, to, *pr);
     } else {
         m->type = MessageType::MsgApp;
         m->index = pr->next() - 1;
@@ -350,8 +340,7 @@ seastar::future<bool> Raft::MaybeSendAppend(uint64_t to, bool send_if_empty) {
                     pr->set_probe_sent(true);
                     break;
                 default:
-                    RAFT_LOG_FATAL(
-                        logger_,
+                    LOG_FATAL_THROW(
                         "[{}-{}] is sending append in unhandled state {}",
                         group_, id_, StateTypeToString(state));
             }
@@ -371,14 +360,12 @@ void Raft::Send(MessagePtr m) {
         m->type == MessageType::MsgPreVote ||
         m->type == MessageType::MsgPreVoteResp) {
         if (m->term == 0) {
-            RAFT_LOG_FATAL(logger_,
-                           "[{}-{}] term should be set when sending {}", group_,
-                           id_, MessageTypeToString(m->type));
+            LOG_FATAL_THROW("[{}-{}] term should be set when sending {}",
+                            group_, id_, MessageTypeToString(m->type));
         }
     } else {
         if (m->term != 0) {
-            RAFT_LOG_FATAL(
-                logger_,
+            LOG_FATAL_THROW(
                 "[{}-{}] term should not be set when sending {} (was {})",
                 group_, id_, MessageTypeToString(m->type), m->term);
         }
@@ -394,65 +381,60 @@ void Raft::Send(MessagePtr m) {
 void Raft::AbortLeaderTransfer() { lead_transferee_ = 0; }
 
 void Raft::BecomeFollower(uint64_t term, uint64_t lead) {
-    step_ = [this](MessagePtr m) -> seastar::future<int> {
+    step_ = [this](MessagePtr m) -> seastar::future<Status<>> {
         return StepFollower(m);
     };
     Reset(term);
-    tick_ = [this]() -> seastar::future<> { return TickElection(); };
+    tick_ = [this]() -> seastar::future<Status<>> { return TickElection(); };
     lead_ = lead;
     state_ = RaftState::StateFollower;
-    RAFT_LOG_INFO(logger_, "[{}-{}] became follower at term {}", group_, id_,
-                  term_);
+    LOG_INFO("[{}-{}] became follower at term {}", group_, id_, term_);
 }
 
 void Raft::BecomePreCandidate() {
     if (state_ == RaftState::StateLeader) {
-        RAFT_LOG_FATAL(logger_,
-                       "[{}-{}] invalid transition [leader -> pre-candidate]",
-                       group_, id_);
+        LOG_FATAL_THROW("[{}-{}] invalid transition [leader -> pre-candidate]",
+                        group_, id_);
     }
 
-    step_ = [this](MessagePtr m) -> seastar::future<int> {
+    step_ = [this](MessagePtr m) -> seastar::future<Status<>> {
         return StepCandidate(m);
     };
     prs_->ResetVotes();
-    tick_ = [this]() -> seastar::future<> { return TickElection(); };
+    tick_ = [this]() -> seastar::future<Status<>> { return TickElection(); };
     lead_ = 0;
     state_ = RaftState::StatePreCandidate;
-    RAFT_LOG_INFO(logger_, "[{}-{}] became pre-candidate at term {}", group_,
-                  id_, term_);
+    LOG_INFO("[{}-{}] became pre-candidate at term {}", group_, id_, term_);
 }
 
 void Raft::BecomeCandidate() {
     if (state_ == RaftState::StateLeader) {
-        RAFT_LOG_FATAL(logger_,
-                       "[{}-{}] invalid transition [leader -> candidate]",
-                       group_, id_);
+        LOG_FATAL_THROW("[{}-{}] invalid transition [leader -> candidate]",
+                        group_, id_);
     }
 
-    step_ = [this](MessagePtr m) -> seastar::future<int> {
+    step_ = [this](MessagePtr m) -> seastar::future<Status<>> {
         return StepCandidate(m);
     };
     Reset(term_ + 1);
-    tick_ = [this]() -> seastar::future<> { return TickElection(); };
+    tick_ = [this]() -> seastar::future<Status<>> { return TickElection(); };
     vote_ = id_;
     state_ = RaftState::StateCandidate;
-    RAFT_LOG_INFO(logger_, "[{}-{}] became candidate at term {}", group_, id_,
-                  term_);
+    LOG_INFO("[{}-{}] became candidate at term {}", group_, id_, term_);
 }
 
-seastar::future<> Raft::BecomeLeader() {
+seastar::future<Status<>> Raft::BecomeLeader() {
     if (state_ == RaftState::StateFollower) {
         RAFT_LOG_FATAL(logger_,
                        "[{}-{}] invalid transition [follower -> leader]",
                        group_, id_);
     }
 
-    step_ = [this](MessagePtr m) -> seastar::future<int> {
+    step_ = [this](MessagePtr m) -> seastar::future<Status<>> {
         return StepLeader(m);
     };
     Reset(term_);
-    tick_ = [this]() -> seastar::future<> { return TickHeartbeat(); };
+    tick_ = [this]() -> seastar::future<Status<>> { return TickHeartbeat(); };
     lead_ = id_;
     state_ = RaftState::StateLeader;
     prs_->progress()[id_]->BecomeReplicate();
@@ -463,16 +445,15 @@ seastar::future<> Raft::BecomeLeader() {
     ents.push_back(empty_ent);
     auto ok = co_await AppendEntry(std::move(ents));
     if (!ok) {
-        RAFT_LOG_FATAL(logger_, "[{}-{}] empty entry was dropped", group_, id_);
+        LOG_FATAL_THROW("[{}-{}] empty entry was dropped", group_, id_);
     }
     ents.push_back(empty_ent);
     ReduceUncommittedSize(ents);
-    RAFT_LOG_INFO(logger_, "[{}-{}] became leader at term {}", group_, id_,
-                  term_);
-    co_return;
+    LOG_INFO("[{}-{}] became leader at term {}", group_, id_, term_);
+    co_return Status<>();
 }
 
-seastar::future<> Raft::TickElection() {
+seastar::future<Status<>> Raft::TickElection() {
     election_elapsed_++;
     if (Promotable() && PastElectionTimeout()) {
         election_elapsed_ = 0;
@@ -481,10 +462,10 @@ seastar::future<> Raft::TickElection() {
         m->type = MessageType::MsgHup;
         co_await Step(m);
     }
-    co_return;
+    co_return Status<>();
 }
 
-seastar::future<> Raft::TickHeartbeat() {
+seastar::future<Status<>> Raft::TickHeartbeat() {
     heartbeat_elapsed_++;
     election_elapsed_++;
 
@@ -502,7 +483,7 @@ seastar::future<> Raft::TickHeartbeat() {
     }
 
     if (state_ != RaftState::StateLeader) {
-        co_return;
+        co_return Status<>();
     }
 
     if (heartbeat_elapsed_ >= heartbeat_timeout_) {
@@ -512,14 +493,15 @@ seastar::future<> Raft::TickHeartbeat() {
         msg->type = MessageType::MsgBeat;
         co_await Step(msg);
     }
-    co_return;
+    co_return Status<>();
 }
 
-seastar::future<int> Raft::StepLeader(MessagePtr m) {
+seastar::future<Status<>> Raft::StepLeader(MessagePtr m) {
+    Status<> s;
     switch (m->type) {
         case MessageType::MsgBeat:
             BcastHeartbeat();
-            co_return RAFT_OK;
+            co_return s;
         case MessageType::MsgCheckQuorum: {
             auto it = prs_->progress().find(id_);
             if (it != prs_->progress().end()) {
@@ -527,10 +509,10 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
             }
 
             if (!prs_->QuorumActive()) {
-                RAFT_LOG_WARN(logger_,
-                              "[{}-{}] stepped down to follower since quorum "
-                              "is not active",
-                              group_, id_);
+                LOG_WARN(
+                    "[{}-{}] stepped down to follower since quorum "
+                    "is not active",
+                    group_, id_);
                 BecomeFollower(term_, 0);
             }
             prs_->Visit([this](uint64_t id, Progress* pr) {
@@ -538,25 +520,25 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                     pr->set_recent_active(false);
                 }
             });
-            co_return RAFT_OK;
+            co_return s;
         }
         case MessageType::MsgProp: {
             if (m->entries.empty()) {
-                RAFT_LOG_FATAL(logger_, "[{}-{}] stepped empty MsgProp", group_,
-                               id_);
+                LOG_FATAL_THROW("[{}-{}] stepped empty MsgProp", group_, id_);
             }
 
             auto it = prs_->progress().find(id_);
             if (it == prs_->progress().end()) {
-                co_return RAFT_ERR_PROPOSALDROPPED;
+                s.Set(ErrCode::ErrRaftProposalDropped);
+                co_return s;
             }
             if (lead_transferee_ != 0) {
-                RAFT_LOG_DEBUG(
-                    logger_,
+                LOG_DEBUG(
                     "[{}-{}] [term {}] transfer leadership to {} is in "
                     "progress; dropping proposal",
                     group_, id_, term_, lead_transferee_);
-                co_return RAFT_ERR_TRANSFERING;
+                s.Set(ErrCode::ErrRaftTransfering);
+                co_return s;
             }
 
             for (int i = 0; i < m->entries.size(); i++) {
@@ -565,17 +547,15 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                 if (e->type() == EntryType::EntryConfChange) {
                     ConfChange ccc;
                     if (!ccc.Unmarshal(std::move(e->data().share()))) {
-                        RAFT_LOG_FATAL(logger_,
-                                       "[{}-{}] unmarshal ConfChange error",
-                                       group_, id_);
+                        LOG_FATAL_THROW("[{}-{}] unmarshal ConfChange error",
+                                        group_, id_);
                     }
                     cc = ccc;
                 } else if (e->type() == EntryType::EntryConfChangeV2) {
                     ConfChangeV2 ccc;
                     if (!ccc.Unmarshal(std::move(e->data().share()))) {
-                        RAFT_LOG_FATAL(logger_,
-                                       "[{}-{}] unmarshal ConfChangeV2 error",
-                                       group_, id_);
+                        LOG_FATAL_THROW("[{}-{}] unmarshal ConfChangeV2 error",
+                                        group_, id_);
                     }
                     cc = ccc;
                 }
@@ -589,29 +569,26 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                     bool refused = false;
                     if (already_pending) {
                         refused = true;
-                        RAFT_LOG_INFO(
-                            logger_,
+                        LOG_INFO(
                             "[{}-{}] ignoring conf change {} at config {}: "
                             "possible "
                             "unapplied conf change at index {} (applied to {})",
-                            group_, id_, (*cc).String(), prs_->String(),
-                            pending_conf_index_, raft_log_->applied());
+                            group_, id_, *cc, *prs_, pending_conf_index_,
+                            raft_log_->applied());
                     } else if (already_joint && !wants_leave_joint) {
                         refused = true;
-                        RAFT_LOG_INFO(logger_,
-                                      "[{}-{}] ignoring conf change {} at "
-                                      "config {}: must "
-                                      "transition out of joint config first",
-                                      group_, id_, (*cc).String(),
-                                      prs_->String());
+                        LOG_INFO(
+                            "[{}-{}] ignoring conf change {} at "
+                            "config {}: must "
+                            "transition out of joint config first",
+                            group_, id_, *cc, *prs_);
                     } else if (!already_joint && wants_leave_joint) {
                         refused = true;
-                        RAFT_LOG_INFO(logger_,
-                                      "[{}-{}] ignoring conf change {} at "
-                                      "config {}: not in "
-                                      "joint state; refusing empty conf change",
-                                      group_, id_, (*cc).String(),
-                                      prs_->String());
+                        LOG_INFO(
+                            "[{}-{}] ignoring conf change {} at "
+                            "config {}: not in "
+                            "joint state; refusing empty conf change",
+                            group_, id_, *cc, *prs_);
                     }
 
                     if (refused) {
@@ -627,11 +604,12 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
 
             bool ok = co_await AppendEntry(std::move(m->entries));
             if (!ok) {
-                co_return RAFT_ERR_PROPOSALDROPPED;
+                s.Set(ErrCode::ErrRaftProposalDropped);
+                co_return s;
             }
 
             co_await BcastAppend();
-            co_return RAFT_OK;
+            co_return s;
         }
         case MessageType::MsgReadIndex:
             if (prs_->IsSingleton()) {
@@ -639,24 +617,23 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                 if (resp->to != 0) {
                     Send(resp);
                 }
-                co_return RAFT_OK;
+                co_return s;
             }
 
             bool ok = co_await CommittedEntryInCurrentTerm();
             if (!ok) {
                 pending_readindex_messages_.push_back(m);
-                co_return RAFT_OK;
+                co_return s;
             }
 
             SendMsgReadIndexResponse(m);
-            co_return RAFT_OK;
+            co_return s;
     }
     // All other message types require a progress for m.From (pr).
     auto it = prs_->progress().find(m->from);
     if (it == prs_->progress().end()) {
-        RAFT_LOG_DEBUG(logger_, "[{}-{}] no progress available for {}", group_,
-                       id_, m->from);
-        co_return RAFT_OK;
+        LOG_DEBUG("[{}-{}] no progress available for {}", group_, id_, m->from);
+        co_return s;
     }
     ProgressPtr pr = it->second;
 
@@ -664,8 +641,7 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
         case MessageType::MsgAppResp:
             pr->set_recent_active(true);
             if (m->reject) {
-                RAFT_LOG_DEBUG(
-                    logger_,
+                LOG_DEBUG(
                     "[{}-{}] received MsgAppResp(rejected, hint: (index {}, "
                     "term {})) from {} for index {}",
                     group_, id_, m->reject_hint, m->log_term, m->from,
@@ -676,9 +652,8 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                         m->reject_hint, m->log_term);
                 }
                 if (pr->MaybeDecrTo(m->index, next_probe_idx)) {
-                    RAFT_LOG_DEBUG(logger_,
-                                   "[{}-{}] decreased progress of {} to [{}]",
-                                   group_, id_, m->from, pr->String());
+                    LOG_DEBUG("[{}-{}] decreased progress of {} to [{}]",
+                              group_, id_, m->from, pr->String());
                     if (pr->state() == StateType::StateReplicate) {
                         pr->BecomeProbe();
                     }
@@ -693,8 +668,7 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                             break;
                         case StateType::StateSnapshot:
                             if (pr->match() >= pr->pending_snapshot()) {
-                                RAFT_LOG_DEBUG(
-                                    logger_,
+                                LOG_DEBUG(
                                     "[{}-{}] recovered from needing snapshot, "
                                     "resumed "
                                     "sending replication messages to {} [{}]",
@@ -725,10 +699,10 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
 
                     if (m->from == lead_transferee_ &&
                         pr->match() == raft_log_->LastIndex()) {
-                        RAFT_LOG_INFO(logger_,
-                                      "[{}-{}] sent MsgTimeoutNow to {} after "
-                                      "received MsgAppResp",
-                                      group_, id_, m->from);
+                        LOG_INFO(
+                            "[{}-{}] sent MsgTimeoutNow to {} after "
+                            "received MsgAppResp",
+                            group_, id_, m->from);
                         SendTimeoutNow(m->from);
                     }
                 }
@@ -746,7 +720,7 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
             }
             if (read_only_->option() != ReadOnlyOption::ReadOnlySafe ||
                 m->context.empty()) {
-                co_return RAFT_OK;
+                co_return s;
             }
 
             if (VoteResult::VoteWon !=
@@ -755,7 +729,7 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
                     read_only_->RecvAck(m->from,
                                         seastar::sstring(m->context.get(),
                                                          m->context.size())))) {
-                co_return RAFT_OK;
+                co_return s;
             }
 
             auto rss = read_only_->Advance(m);
@@ -769,23 +743,21 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
         }
         case MessageType::MsgSnapStatus:
             if (pr->state() != StateType::StateSnapshot) {
-                co_return RAFT_OK;
+                co_return s;
             }
             if (!m->reject) {
                 pr->BecomeProbe();
-                RAFT_LOG_DEBUG(
-                    logger_,
+                LOG_DEBUG(
                     "[{}-{}] snapshot succeeded, resumed sending replication "
                     "messages to {} [{}]",
-                    group_, id_, m->from, pr->String());
+                    group_, id_, m->from, *pr);
             } else {
                 pr->set_pending_snapshot(0);
                 pr->BecomeProbe();
-                RAFT_LOG_DEBUG(
-                    logger_,
+                LOG_DEBUG(
                     "[{}-{}] snapshot failed, resumed sending replication "
                     "messages to {} [{}]",
-                    group_, id_, m->from, pr->String());
+                    group_, id_, m->from, *pr);
             }
             pr->set_probe_sent(true);
             break;
@@ -793,17 +765,16 @@ seastar::future<int> Raft::StepLeader(MessagePtr m) {
             if (pr->state() == StateType::StateReplicate) {
                 pr->BecomeProbe();
             }
-            RAFT_LOG_DEBUG(logger_,
-                           "[{}-{}] failed to send message to {} because it is "
-                           "unreachable [{}]",
-                           group_, id_, m->from, pr->String());
+            LOG_DEBUG(
+                "[{}-{}] failed to send message to {} because it is "
+                "unreachable [{}]",
+                group_, id_, m->from, *pr);
             break;
         case MessageType::MsgTransferLeader: {
             if (pr->is_learner()) {
-                RAFT_LOG_DEBUG(
-                    logger_,
-                    "[{}-{}] is learner. Ignored transferring leadership",
-                    group_, id_);
+                LOG_DEBUG("[{}-{}] is learner. Ignored transferring leadership",
+                          group_, id_);
+
                 co_return RAFT_ERR_ISLEARNER;
             }
             uint64_t lead_transferee = m->from;
