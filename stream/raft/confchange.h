@@ -1,14 +1,14 @@
 #pragma once
 #include "tracker.h"
 #include "util/status.h"
-#include "util/util.h"
 
 namespace snail {
 namespace raft {
 
 class Changer {
-    SNAIL_PRIVATE
-
+#ifdef RAFT_UT_TEST
+   public:
+#endif
     uint64_t group_;
     uint64_t id_;
     uint64_t last_index_;

@@ -3,12 +3,6 @@
 #include <seastar/core/sharded.hh>
 #include <seastar/core/temporary_buffer.hh>
 
-#ifdef SNAIL_UT_TEST
-#define SNAIL_PRIVATE public:
-#else
-#define SNAIL_PRIVATE private:
-#endif
-
 namespace snail {
 
 using Buffer = seastar::temporary_buffer<char>;

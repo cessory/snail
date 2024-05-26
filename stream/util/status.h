@@ -31,6 +31,12 @@ enum class ErrCode {
     ErrRaftProposalDropped = 21007,
     ErrRaftTransfering = 21008,
     ErrRaftIslearner = 21009,
+    ErrRaftLeadtransferProgressing = 21010,
+    ErrRaftLeadtransferSelf = 21011,
+    ErrRaftNoLeader = 21012,
+    ErrRaftStepLocalMsg = 21013,
+    ErrRaftStepPeerNotFound = 21014,
+    ErrRaftAbort = 21015,
     ErrUnExpect = 29999
 };
 

@@ -1,6 +1,6 @@
 #include "confchange.h"
 
-#include "raft_errno.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace raft {
@@ -422,6 +422,7 @@ Status<std::tuple<TrackerConfig, ProgressMap>> Changer::CheckAndCopy() {
 
 Status<std::tuple<TrackerConfig, ProgressMap>> Changer::CheckAndReturn(
     TrackerConfig cfg, ProgressMap prs) {
+    Status<std::tuple<TrackerConfig, ProgressMap>> s;
     auto st = CheckInvariants(cfg, prs);
     if (!st) {
         s.Set(st.Code());

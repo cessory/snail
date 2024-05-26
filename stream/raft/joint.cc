@@ -16,8 +16,12 @@ std::unordered_set<uint64_t> IDs(const JointConfig& cfg) {
 uint64_t CommittedIndex(
     const JointConfig& cfg,
     seastar::noncopyable_function<std::tuple<uint64_t, bool>(uint64_t)>&& fn) {
-    auto idx0 = CommittedIndex(cfg[0], fn);
-    auto idx1 = CommittedIndex(cfg[1], fn);
+    auto idx0 =
+        CommittedIndex(cfg[0], std::forward<seastar::noncopyable_function<
+                                   std::tuple<uint64_t, bool>(uint64_t)>>(fn));
+    auto idx1 =
+        CommittedIndex(cfg[1], std::forward<seastar::noncopyable_function<
+                                   std::tuple<uint64_t, bool>(uint64_t)>>(fn));
 
     return idx0 < idx1 ? idx0 : idx1;
 }

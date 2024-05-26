@@ -44,13 +44,6 @@ class ReadOnly {
     };
     using ReadIndexStatusPtr = seastar::lw_shared_ptr<ReadIndexStatus>;
 
-    SNAIL_PRIVATE
-    ReadOnlyOption option_;
-    std::unordered_map<seastar::sstring, ReadIndexStatusPtr>
-        pending_read_index_;
-    std::deque<seastar::sstring> read_index_queue_;
-
-   public:
     explicit ReadOnly(ReadOnlyOption option) : option_(option) {}
 
     void AddRequest(uint64_t index, MessagePtr m);
@@ -65,6 +58,12 @@ class ReadOnly {
     void Reset();
 
     ReadOnlyOption option() const { return option_; }
+
+   private:
+    ReadOnlyOption option_;
+    std::unordered_map<seastar::sstring, ReadIndexStatusPtr>
+        pending_read_index_;
+    std::deque<seastar::sstring> read_index_queue_;
 };
 
 }  // namespace raft

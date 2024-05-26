@@ -1,11 +1,9 @@
 #include "raft_proto.h"
 
-#include <fmt/format.h>
 #include <string.h>
 
 #include <seastar/net/byteorder.hh>
 
-#include "raft_errno.h"
 #include "util/util.h"
 
 namespace snail {
@@ -23,6 +21,17 @@ static const char* raft_states[] = {
     "StateLeader",
     "StatePreCandidate",
 };
+static const char* campaign_types[] = {
+    "CampaignPreElection",
+    "CampaignElection",
+    "CampaignTransfer",
+};
+
+static const char* entry_types[] = {
+    "EntryNormal",
+    "EntryConfChange",
+    "EntryConfChangeV2",
+};
 
 static const char* msg_types[] = {
     "MsgHup",           "MsgBeat",           "MsgProp",        "MsgApp",
@@ -36,6 +45,31 @@ const char* StateTypeToString(StateType type) { return prstmap[(int)type]; }
 
 const char* RaftStateToString(RaftState state) {
     return raft_states[(int)state];
+}
+
+std::ostream& operator<<(std::ostream& os, const StateType& type) {
+    os << StateTypeToString(type);
+    return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const RaftState& rs) {
+    os << RaftStateToString(rs);
+    return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const CampaignType& type) {
+    os << campaign_types[(int)type];
+    return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const EntryType& type) {
+    os << entry_types[(int)type];
+    return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const MessageType& type) {
+    os << msg_types[(int)type];
+    return os;
 }
 
 void Entry::Reset() {
@@ -957,10 +991,11 @@ seastar::temporary_buffer<char> ConfChange::Marshal() {
     return buf;
 }
 
-std::string ConfChange::String() {
-    return fmt::format("{}\"type\":{}, \"nodeid\":{}, \"context\":{}{}", "{",
-                       (int)type_, node_id_,
-                       std::string(context_.get(), context_.size()), "}");
+std::ostream& operator<<(std::ostream& os, const ConfChange& cc) {
+    os << fmt::format("{}\"type\":{}, \"nodeid\":{}, \"context\":{}{}", "{",
+                      (int)cc.type_, cc.node_id_,
+                      std::string(cc.context_.get(), cc.context_.size()), "}");
+    return os;
 }
 
 bool ConfChangeSingle::Empty() const {
@@ -1219,33 +1254,36 @@ std::tuple<bool, bool> ConfChangeV2::EnterJoint() {
     return std::tuple<bool, bool>(auto_leave, ok);
 }
 
-std::string ConfChangeV2::String() {
+std::ostream& operator<<(std::ostream& os, const ConfChangeV2& cc) {
     auto out = fmt::memory_buffer();
     fmt::format_to(std::back_inserter(out), "{}\"transition\":{}", "{}",
-                   (int)transition_);
+                   (int)cc.transition_);
     fmt::format_to(std::back_inserter(out), ", \"changes\":[");
-    for (size_t i = 0; i < changes_.size(); i++) {
+    for (size_t i = 0; i < cc.changes_.size(); i++) {
         if (i == 0) {
-            fmt::format_to(std::back_inserter(out),
-                           "{}\"type\":{}, \"nodeid\": {}{}", "{",
-                           (int)changes_[i].type(), changes_[i].node_id(), "}");
+            fmt::format_to(
+                std::back_inserter(out), "{}\"type\":{}, \"nodeid\": {}{}", "{",
+                (int)cc.changes_[i].type(), cc.changes_[i].node_id(), "}");
         } else {
-            fmt::format_to(std::back_inserter(out),
-                           ", {}\"type\":{}, \"nodeid\": {}{}", "{",
-                           (int)changes_[i].type(), changes_[i].node_id(), "}");
+            fmt::format_to(
+                std::back_inserter(out), ", {}\"type\":{}, \"nodeid\": {}{}",
+                "{", (int)cc.changes_[i].type(), cc.changes_[i].node_id(), "}");
         }
     }
     fmt::format_to(std::back_inserter(out), "]");
     fmt::format_to(std::back_inserter(out), ", \"context\":{}",
-                   std::string(context_.get(), context_.size()));
-    return fmt::to_string(out);
+                   std::string(cc.context_.get(), cc.context_.size()));
+    os << fmt::to_string(out);
+    return os;
 }
 
-std::string ConfChangeI::String() {
-    if (is_v1_) {
-        return v1_.String();
+std::ostream& operator<<(std::ostream& os, const ConfChangeI& cc) {
+    if (cc.is_v1_) {
+        os << cc.v1_;
+    } else {
+        os << cc.v2_;
     }
-    return v2_.String();
+    return os;
 }
 
 seastar::temporary_buffer<char> ConfChangeI::Marshal() {

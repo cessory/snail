@@ -2,7 +2,7 @@
 
 #include <seastar/core/coroutine.hh>
 
-#include "raft_errno.h"
+#include "util/logger.h"
 
 namespace snail {
 namespace raft {
@@ -76,12 +76,12 @@ seastar::future<Status<>> Raft::Init(const Config c) {
     TrackerConfig cfg;
     ProgressMap prs;
 
-    auto st = chg.Restore(cs);
-    if (!st) {
-        s.Set(st.Code());
+    auto st1 = chg.Restore(cs);
+    if (!st1) {
+        s.Set(st1.Code());
         co_return s;
     }
-    std::tie(cfg, prs) = st.Value();
+    std::tie(cfg, prs) = st1.Value();
 
     auto cs1 = co_await SwitchToConfig(cfg, prs);
     if (cs != cs1) {
@@ -224,7 +224,7 @@ seastar::future<Status<>> Raft::BcastAppend() {
     return prs_->AsyncVisit(
         [this](uint64_t id, ProgressPtr pr) -> seastar::future<Status<>> {
             if (id_ == id) {
-                return seastar::make_ready_future(Status<>());
+                return seastar::make_ready_future<Status<>>();
             }
             return SendAppend(id);
         });
@@ -324,8 +324,8 @@ seastar::future<bool> Raft::MaybeSendAppend(uint64_t to, bool send_if_empty) {
     } else {
         m->type = MessageType::MsgApp;
         m->index = pr->next() - 1;
-        m->log_term = r.val;
-        m->entries = std::move(r1.val);
+        m->log_term = s1.Value();
+        m->entries = std::move(s2.Value());
         m->commit = raft_log_->committed();
         if (m->entries.size() != 0) {
             auto state = pr->state();
@@ -425,9 +425,8 @@ void Raft::BecomeCandidate() {
 
 seastar::future<Status<>> Raft::BecomeLeader() {
     if (state_ == RaftState::StateFollower) {
-        RAFT_LOG_FATAL(logger_,
-                       "[{}-{}] invalid transition [follower -> leader]",
-                       group_, id_);
+        LOG_FATAL("[{}-{}] invalid transition [follower -> leader]", group_,
+                  id_);
     }
 
     step_ = [this](MessagePtr m) -> seastar::future<Status<>> {
@@ -653,7 +652,7 @@ seastar::future<Status<>> Raft::StepLeader(MessagePtr m) {
                 }
                 if (pr->MaybeDecrTo(m->index, next_probe_idx)) {
                     LOG_DEBUG("[{}-{}] decreased progress of {} to [{}]",
-                              group_, id_, m->from, pr->String());
+                              group_, id_, m->from, *pr);
                     if (pr->state() == StateType::StateReplicate) {
                         pr->BecomeProbe();
                     }
@@ -672,7 +671,7 @@ seastar::future<Status<>> Raft::StepLeader(MessagePtr m) {
                                     "[{}-{}] recovered from needing snapshot, "
                                     "resumed "
                                     "sending replication messages to {} [{}]",
-                                    group_, id_, m->from, pr->String());
+                                    group_, id_, m->from, *pr);
                                 pr->BecomeProbe();
                                 pr->BecomeReplicate();
                             }
@@ -775,44 +774,42 @@ seastar::future<Status<>> Raft::StepLeader(MessagePtr m) {
                 LOG_DEBUG("[{}-{}] is learner. Ignored transferring leadership",
                           group_, id_);
 
-                co_return RAFT_ERR_ISLEARNER;
+                s.Set(ErrCode::ErrRaftIslearner);
+                co_return s;
             }
             uint64_t lead_transferee = m->from;
             uint64_t last_lead_transferee = lead_transferee_;
             if (last_lead_transferee != 0) {
                 if (last_lead_transferee == lead_transferee) {
-                    RAFT_LOG_INFO(
-                        logger_,
+                    LOG_INFO(
                         "[{}-{}] [term {}] transfer leadership to {} is in "
                         "progress, ignores request to same node {}",
                         group_, id_, term_, lead_transferee, lead_transferee);
-                    co_return RAFT_ERR_LEADTRANSFER_PROGRESSING;
+                    s.Set(ErrCode::ErrRaftLeadtransferProgressing);
+                    co_return s;
                 }
                 AbortLeaderTransfer();
-                RAFT_LOG_INFO(logger_,
-                              "[{}-{}] [term {}] abort previous transferring "
-                              "leadership to {}",
-                              group_, id_, term_, last_lead_transferee);
+                LOG_INFO(
+                    "[{}-{}] [term {}] abort previous transferring "
+                    "leadership to {}",
+                    group_, id_, term_, last_lead_transferee);
             }
             if (lead_transferee == id_) {
-                RAFT_LOG_DEBUG(
-                    logger_,
+                LOG_DEBUG(
                     "[{}-{}] is already leader. Ignored transferring "
                     "leadership to self",
                     group_, id_);
-                co_return RAFT_ERR_LEADTRANSFER_SELF;
+                s.Set(ErrCode::ErrRaftLeadtransferSelf);
+                co_return s;
             }
 
-            RAFT_LOG_INFO(
-                logger_,
-                "[{}-{}] [term {}] starts to transfer leadership to {}", group_,
-                id_, term_, lead_transferee);
+            LOG_INFO("[{}-{}] [term {}] starts to transfer leadership to {}",
+                     group_, id_, term_, lead_transferee);
             election_elapsed_ = 0;
             lead_transferee_ = lead_transferee;
             if (pr->match() == raft_log_->LastIndex()) {
                 SendTimeoutNow(lead_transferee);
-                RAFT_LOG_INFO(
-                    logger_,
+                LOG_INFO(
                     "[{}-{}] sends MsgTimeoutNow to {} immediately as {} "
                     "already has up-to-date log",
                     group_, id_, lead_transferee, lead_transferee);
@@ -822,23 +819,25 @@ seastar::future<Status<>> Raft::StepLeader(MessagePtr m) {
             break;
         }
     }
-    co_return RAFT_OK;
+    co_return s;
 }
 
-seastar::future<int> Raft::StepFollower(MessagePtr m) {
+seastar::future<Status<>> Raft::StepFollower(MessagePtr m) {
+    Status<> s;
     switch (m->type) {
         case MessageType::MsgProp:
             if (lead_ == 0) {
-                RAFT_LOG_INFO(logger_,
-                              "[{}-{}] no leader at term {}; dropping proposal",
-                              group_, id_, term_);
-                co_return RAFT_ERR_NOLEADER;
+                LOG_INFO("[{}-{}] no leader at term {}; dropping proposal",
+                         group_, id_, term_);
+                s.Set(ErrCode::ErrRaftNoLeader);
+                co_return s;
             } else if (disable_proposal_forwarding_) {
-                RAFT_LOG_INFO(logger_,
-                              "[{}-{}] not forwarding to leader {} at term {}; "
-                              "dropping proposal",
-                              group_, id_, lead_, term_);
-                co_return RAFT_ERR_PROPOSALDROPPED;
+                LOG_INFO(
+                    "[{}-{}] not forwarding to leader {} at term {}; "
+                    "dropping proposal",
+                    group_, id_, lead_, term_);
+                s.Set(ErrCode::ErrRaftProposalDropped);
+                co_return s;
             }
             m->to = lead_;
             Send(m);
@@ -860,18 +859,18 @@ seastar::future<int> Raft::StepFollower(MessagePtr m) {
             break;
         case MessageType::MsgTransferLeader:
             if (lead_ == 0) {
-                RAFT_LOG_INFO(logger_,
-                              "[{}-{}] no leader at term {}; dropping leader "
-                              "transfer msg",
-                              group_, id_, term_);
-                co_return RAFT_ERR_NOLEADER;
+                LOG_INFO(
+                    "[{}-{}] no leader at term {}; dropping leader "
+                    "transfer msg",
+                    group_, id_, term_);
+                s.Set(ErrCode::ErrRaftNoLeader);
+                co_return s;
             }
             m->to = lead_;
             Send(m);
             break;
         case MessageType::MsgTimeoutNow:
-            RAFT_LOG_INFO(
-                logger_,
+            LOG_INFO(
                 "[{}-{}] [term {}] received MsgTimeoutNow from {} and starts "
                 "an election to get leadership.",
                 group_, id_, term_, m->from);
@@ -879,45 +878,45 @@ seastar::future<int> Raft::StepFollower(MessagePtr m) {
             break;
         case MessageType::MsgReadIndex:
             if (lead_ == 0) {
-                RAFT_LOG_INFO(
-                    logger_,
+                LOG_INFO(
                     "[{}-{}] no leader at term {}; dropping index reading msg",
                     group_, id_, term_);
-                co_return RAFT_ERR_NOLEADER;
+                s.Set(ErrCode::ErrRaftNoLeader);
+                co_return s;
             }
             m->to = lead_;
             Send(m);
             break;
         case MessageType::MsgReadIndexResp: {
             if (m->entries.size() != 1) {
-                RAFT_LOG_ERROR(
-                    logger_,
+                LOG_ERROR(
                     "[{}-{}] invalid format of MsgReadIndexResp from {}, "
                     "entries count: {}",
                     group_, id_, m->from, m->entries.size());
-                co_return RAFT_OK;
+                co_return s;
             }
 
-            ReadState s;
-            s.index = m->index;
-            s.request_ctx = std::move(m->entries[0]->data());
-            read_states_.push_back(std::move(s));
+            ReadState rs;
+            rs.index = m->index;
+            rs.request_ctx = std::move(m->entries[0]->data());
+            read_states_.push_back(std::move(rs));
             break;
         }
     }
-    co_return RAFT_OK;
+    co_return s;
 }
 
-seastar::future<int> Raft::StepCandidate(MessagePtr m) {
+seastar::future<Status<>> Raft::StepCandidate(MessagePtr m) {
+    Status<> s;
     MessageType my_vote_resp_type = state_ == RaftState::StatePreCandidate
                                         ? MessageType::MsgPreVoteResp
                                         : MessageType::MsgVoteResp;
     switch (m->type) {
         case MessageType::MsgProp:
-            RAFT_LOG_INFO(logger_,
-                          "[{}-{}] no leader at term {}; dropping proposal",
-                          group_, id_, term_);
-            co_return RAFT_ERR_NOLEADER;
+            LOG_INFO("[{}-{}] no leader at term {}; dropping proposal", group_,
+                     id_, term_);
+            s.Set(ErrCode::ErrRaftNoLeader);
+            co_return s;
         case MessageType::MsgApp:
             BecomeFollower(m->term, m->from);
             co_await HandleAppendEntries(m);
@@ -933,16 +932,14 @@ seastar::future<int> Raft::StepCandidate(MessagePtr m) {
         case MessageType::MsgPreVoteResp:
         case MessageType::MsgVoteResp: {
             if (m->type != my_vote_resp_type) {
-                co_return RAFT_OK;
+                co_return s;
             }
             auto r = Poll(m->from, m->type, !m->reject);
             int gr, rj;
             VoteResult res;
             std::tie(gr, rj, res) = r;
-            RAFT_LOG_INFO(
-                logger_,
-                "[{}-{}] has received {} {} votes and {} vote rejections",
-                group_, id_, gr, MessageTypeToString(m->type), rj);
+            LOG_INFO("[{}-{}] has received {} {} votes and {} vote rejections",
+                     group_, id_, gr, MessageTypeToString(m->type), rj);
             switch (res) {
                 case VoteResult::VoteWon:
                     if (state_ == RaftState::StatePreCandidate) {
@@ -959,53 +956,50 @@ seastar::future<int> Raft::StepCandidate(MessagePtr m) {
             break;
         }
         case MessageType::MsgTimeoutNow:
-            RAFT_LOG_DEBUG(
-                logger_,
+            LOG_DEBUG(
                 "[{}-{}] [term {} state {}] ignored MsgTimeoutNow from {}",
                 group_, id_, term_, RaftStateToString(state_), m->from);
             break;
     }
-    co_return RAFT_OK;
+    co_return s;
 }
 
-seastar::future<> Raft::Hup(CampaignType t) {
+seastar::future<Status<>> Raft::Hup(CampaignType t) {
+    Status<> s;
     if (state_ == RaftState::StateLeader) {
-        RAFT_LOG_DEBUG(logger_,
-                       "[{}-{}] ignoring MsgHup because already leader", group_,
-                       id_);
-        co_return;
+        LOG_DEBUG("[{}-{}] ignoring MsgHup because already leader", group_,
+                  id_);
+        co_return s;
     }
 
     if (!Promotable()) {
-        RAFT_LOG_WARN(logger_, "[{}-{}] is unpromotable and can not campaign",
-                      group_, id_);
-        co_return;
+        LOG_WARN("[{}-{}] is unpromotable and can not campaign", group_, id_);
+        co_return s;
     }
 
-    auto r = co_await raft_log_->Slice(raft_log_->applied() + 1,
-                                       raft_log_->committed() + 1,
-                                       std::numeric_limits<uint64_t>::max());
-    if (r.err != RAFT_OK) {
-        RAFT_LOG_FATAL(
-            logger_, "[{}-{}] unexpected error getting unapplied entries ({})",
-            group_, id_, raft_error(r.err));
+    auto st = co_await raft_log_->Slice(raft_log_->applied() + 1,
+                                        raft_log_->committed() + 1,
+                                        std::numeric_limits<uint64_t>::max());
+    if (!st) {
+        LOG_FATAL_THROW(
+            "[{}-{}] unexpected error getting unapplied entries ({})", group_,
+            id_, st);
     }
 
-    std::vector<EntryPtr> ents = std::move(r.val);
+    std::vector<EntryPtr> ents = std::move(st.Value());
     int n = NumOfPendingConf(ents);
     if (n != 0 && raft_log_->committed() > raft_log_->applied()) {
-        RAFT_LOG_WARN(
-            logger_,
+        LOG_WARN(
             "[{}-{}] cannot campaign at term {} since there are still {} "
             "pending configuration changes to apply",
             group_, id_, term_, n);
-        co_return;
+        co_return s;
     }
 
-    RAFT_LOG_INFO(logger_, "[{}-{}] is starting a new election at term {}",
-                  group_, id_, term_);
+    LOG_INFO("[{}-{}] is starting a new election at term {}", group_, id_,
+             term_);
     co_await Campaign(t);
-    co_return;
+    co_return s;
 }
 
 int Raft::NumOfPendingConf(const std::vector<EntryPtr>& ents) {
@@ -1019,12 +1013,11 @@ int Raft::NumOfPendingConf(const std::vector<EntryPtr>& ents) {
     return n;
 }
 
-seastar::future<> Raft::Campaign(CampaignType t) {
+seastar::future<Status<>> Raft::Campaign(CampaignType t) {
+    Status<> s;
     if (!Promotable()) {
-        RAFT_LOG_WARN(
-            logger_,
-            "[{}-{}] is unpromotable; campaign() should have been called",
-            group_, id_);
+        LOG_WARN("[{}-{}] is unpromotable; campaign() should have been called",
+                 group_, id_);
     }
     uint64_t term;
     MessageType vote_msg;
@@ -1051,7 +1044,7 @@ seastar::future<> Raft::Campaign(CampaignType t) {
         } else {
             co_await BecomeLeader();
         }
-        co_return;
+        co_return s;
     }
 
     auto last_term = co_await raft_log_->LastTerm();
@@ -1063,11 +1056,11 @@ seastar::future<> Raft::Campaign(CampaignType t) {
             if (id_ == id) {
                 continue;
             }
-            RAFT_LOG_INFO(logger_,
-                          "[{}-{}] [logterm: {}, index: {}] sent {} request to "
-                          "{} at term {}",
-                          group_, id_, last_term, last_index,
-                          MessageTypeToString(vote_msg), id, term_);
+            LOG_INFO(
+                "[{}-{}] [logterm: {}, index: {}] sent {} request to "
+                "{} at term {}",
+                group_, id_, last_term, last_index,
+                MessageTypeToString(vote_msg), id, term_);
             MessagePtr msg = seastar::make_lw_shared<Message>();
             if (t == CampaignType::CampaignTransfer) {
                 msg->context = std::move(
@@ -1081,32 +1074,32 @@ seastar::future<> Raft::Campaign(CampaignType t) {
             Send(msg);
         }
     }
-    co_return;
+    co_return s;
 }
 
 std::tuple<int, int, VoteResult> Raft::Poll(uint64_t id, MessageType t,
                                             bool v) {
     if (v) {
-        RAFT_LOG_INFO(logger_, "[{}-{}] received {} from {} at term {}", group_,
-                      id_, MessageTypeToString(t), id, term_);
+        LOG_INFO("[{}-{}] received {} from {} at term {}", group_, id_,
+                 MessageTypeToString(t), id, term_);
     } else {
-        RAFT_LOG_INFO(logger_,
-                      "[{}-{}] received {} rejection from {} at term {}",
-                      group_, id_, MessageTypeToString(t), id, term_);
+        LOG_INFO("[{}-{}] received {} rejection from {} at term {}", group_,
+                 id_, MessageTypeToString(t), id, term_);
     }
 
     prs_->RecordVote(id, v);
     return prs_->TallyVotes();
 }
 
-seastar::future<> Raft::HandleAppendEntries(MessagePtr m) {
+seastar::future<Status<>> Raft::HandleAppendEntries(MessagePtr m) {
+    Status<> s;
     if (m->index < raft_log_->committed()) {
         MessagePtr msg = seastar::make_lw_shared<Message>();
         msg->to = m->from;
         msg->type = MessageType::MsgAppResp;
         msg->index = raft_log_->committed();
         Send(msg);
-        co_return;
+        co_return s;
     }
 
     uint64_t last_index;
@@ -1121,18 +1114,16 @@ seastar::future<> Raft::HandleAppendEntries(MessagePtr m) {
         msg->index = last_index;
         Send(msg);
     } else {
-        RAFT_LOG_DEBUG(
-            logger_, "[{}-{}] rejected MsgApp [logterm: {}, index: {}] from {}",
-            group_, id_, m->log_term, m->index, m->from);
+        LOG_DEBUG("[{}-{}] rejected MsgApp [logterm: {}, index: {}] from {}",
+                  group_, id_, m->log_term, m->index, m->from);
 
         auto hint_index = std::min(m->index, raft_log_->LastIndex());
         hint_index =
             co_await raft_log_->FindConflictByTerm(hint_index, m->log_term);
-        auto r = co_await raft_log_->Term(hint_index);
-        if (r.err != RAFT_OK) {
-            RAFT_LOG_FATAL(logger_,
-                           "[{}-{}] term({}) must be valid, but got {}", group_,
-                           id_, hint_index, raft_error(r.err));
+        auto st = co_await raft_log_->Term(hint_index);
+        if (!st) {
+            LOG_FATAL_THROW("[{}-{}] term({}) must be valid, but got {}",
+                            group_, id_, hint_index, st);
         }
         MessagePtr msg = seastar::make_lw_shared<Message>();
         msg->to = m->from;
@@ -1140,10 +1131,10 @@ seastar::future<> Raft::HandleAppendEntries(MessagePtr m) {
         msg->index = m->index;
         msg->reject = true;
         msg->reject_hint = hint_index;
-        msg->log_term = r.val;
+        msg->log_term = st.Value();
         Send(msg);
     }
-    co_return;
+    co_return s;
 }
 
 void Raft::HandleHeartbeat(MessagePtr m) {
@@ -1155,7 +1146,8 @@ void Raft::HandleHeartbeat(MessagePtr m) {
     Send(msg);
 }
 
-seastar::future<> Raft::HandleSnapshot(MessagePtr m) {
+seastar::future<Status<>> Raft::HandleSnapshot(MessagePtr m) {
+    Status<> s;
     uint64_t sindex = m->snapshot->metadata().index();
     uint64_t sterm = m->snapshot->metadata().term();
 
@@ -1165,20 +1157,16 @@ seastar::future<> Raft::HandleSnapshot(MessagePtr m) {
     msg->type = MessageType::MsgAppResp;
     if (ok) {
         msg->index = raft_log_->LastIndex();
-        RAFT_LOG_INFO(
-            logger_,
-            "[{}-{}] [commit: {}] restored snapshot [index: {}, term: {}]",
-            group_, id_, raft_log_->committed(), sindex, sterm);
+        LOG_INFO("[{}-{}] [commit: {}] restored snapshot [index: {}, term: {}]",
+                 group_, id_, raft_log_->committed(), sindex, sterm);
         Send(msg);
     } else {
         msg->index = raft_log_->committed();
-        RAFT_LOG_INFO(
-            logger_,
-            "[{}-{}] [commit: {}] ignored snapshot [index: {}, term: {}]",
-            group_, id_, raft_log_->committed(), sindex, sterm);
+        LOG_INFO("[{}-{}] [commit: {}] ignored snapshot [index: {}, term: {}]",
+                 group_, id_, raft_log_->committed(), sindex, sterm);
         Send(msg);
     }
-    co_return;
+    co_return s;
 }
 
 seastar::future<bool> Raft::Restore(SnapshotPtr s) {
@@ -1187,10 +1175,10 @@ seastar::future<bool> Raft::Restore(SnapshotPtr s) {
     }
 
     if (state_ != RaftState::StateFollower) {
-        RAFT_LOG_WARN(logger_,
-                      "[{}-{}] attempted to restore snapshot as leader; should "
-                      "never happen",
-                      group_, id_);
+        LOG_WARN(
+            "[{}-{}] attempted to restore snapshot as leader; should "
+            "never happen",
+            group_, id_);
         BecomeFollower(term_ + 1, 0);
         co_return false;
     }
@@ -1219,8 +1207,7 @@ seastar::future<bool> Raft::Restore(SnapshotPtr s) {
 
     found = f(cs, id_);
     if (!found) {
-        RAFT_LOG_WARN(
-            logger_,
+        LOG_WARN(
             "[{}-{}] attempted to restore snapshot but it is not in the "
             "ConfState; should never happen",
             group_, id_);
@@ -1233,44 +1220,40 @@ seastar::future<bool> Raft::Restore(SnapshotPtr s) {
                                                s->metadata().term());
     if (match) {
         auto last_term = co_await raft_log_->LastTerm();
-        RAFT_LOG_INFO(logger_,
-                      "[{}-{}] [commit: {}, lastindex: {}, lastterm: {}] "
-                      "fast-forwarded commit to snapshot [index: {}, term: {}]",
-                      group_, id_, raft_log_->committed(),
-                      raft_log_->LastIndex(), last_term, s->metadata().index(),
-                      s->metadata().term());
+        LOG_INFO(
+            "[{}-{}] [commit: {}, lastindex: {}, lastterm: {}] "
+            "fast-forwarded commit to snapshot [index: {}, term: {}]",
+            group_, id_, raft_log_->committed(), raft_log_->LastIndex(),
+            last_term, s->metadata().index(), s->metadata().term());
         raft_log_->CommitTo(s->metadata().index());
         co_return false;
     }
 
     raft_log_->Restore(s);
     prs_ = seastar::make_lw_shared<ProgressTracker>(prs_->max_inflight());
-    Changer chg(raft_log_->LastIndex(), prs_, logger_);
-    auto r = chg.Restore(cs);
-
+    Changer chg(raft_log_->LastIndex(), prs_);
+    auto st = chg.Restore(cs);
+    if (!st) {
+        LOG_FATAL_THROW("[{}-{}] unable to restore config: {}", group_, id_,
+                        st);
+    }
     TrackerConfig cfg;
     ProgressMap prs;
-    int err;
-    std::tie(cfg, prs, err) = r;
-    if (err != RAFT_OK) {
-        RAFT_LOG_FATAL(logger_, "[{}-{}] unable to restore config: {}", group_,
-                       id_, raft_error(err));
-    }
+    std::tie(cfg, prs) = st.Value();
 
     auto cs1 = co_await SwitchToConfig(std::move(cfg), std::move(prs));
     if (cs != cs1) {
-        RAFT_LOG_FATAL(logger_, "[{}-{}] confstate is not equivalent", group_,
-                       id_);
+        LOG_FATAL_THROW("[{}-{}] confstate is not equivalent", group_, id_);
     }
     auto pr = prs_->progress()[id_];
     pr->MaybeUpdate(pr->next() - 1);
 
     auto last_term = co_await raft_log_->LastTerm();
-    RAFT_LOG_INFO(logger_,
-                  "[{}-{}] [commit: {}, lastindex: {}, lastterm: {}] restored "
-                  "snapshot [index: {}, term: {}]",
-                  group_, id_, raft_log_->committed(), raft_log_->LastIndex(),
-                  last_term, s->metadata().index(), s->metadata().term());
+    LOG_INFO(
+        "[{}-{}] [commit: {}, lastindex: {}, lastterm: {}] restored "
+        "snapshot [index: {}, term: {}]",
+        group_, id_, raft_log_->committed(), raft_log_->LastIndex(), last_term,
+        s->metadata().index(), s->metadata().term());
     co_return true;
 }
 
@@ -1334,8 +1317,7 @@ seastar::future<bool> Raft::AppendEntry(std::vector<EntryPtr> es) {
 
     if (uncommitted_size_ > 0 && s > 0 &&
         uncommitted_size_ + s > max_uncommitted_size_) {
-        RAFT_LOG_INFO(
-            logger_,
+        LOG_INFO(
             "[{}-{}] appending new entries to log would exceed uncommitted "
             "entry size limit; dropping proposal",
             group_, id_);
@@ -1383,8 +1365,8 @@ MessagePtr Raft::ResponseToReadIndexReq(MessagePtr req, uint64_t read_index) {
 }
 
 seastar::future<bool> Raft::CommittedEntryInCurrentTerm() {
-    auto r = co_await raft_log_->Term(raft_log_->committed());
-    auto index = raft_log_->ZeroTermOnErrCompacted(r.val, r.err);
+    auto s = co_await raft_log_->Term(raft_log_->committed());
+    auto index = raft_log_->ZeroTermOnErrCompacted(s);
     co_return index == term_;
 }
 
@@ -1408,22 +1390,22 @@ void Raft::SendMsgReadIndexResponse(MessagePtr m) {
     }
 }
 
-seastar::future<> Raft::ReleasePendingReadIndexMessages() {
+seastar::future<Status<>> Raft::ReleasePendingReadIndexMessages() {
+    Status<> s;
     auto ok = co_await CommittedEntryInCurrentTerm();
     if (!ok) {
-        RAFT_LOG_ERROR(
-            logger_,
+        LOG_ERROR(
             "[{}-{}] pending MsgReadIndex should be released only after "
             "first commit in current term",
             group_, id_);
-        co_return;
+        co_return s;
     }
 
     for (auto e : pending_readindex_messages_) {
         SendMsgReadIndexResponse(e);
     }
     pending_readindex_messages_.clear();
-    co_return;
+    co_return s;
 }
 
 void Raft::SendTimeoutNow(uint64_t to) {
@@ -1433,7 +1415,8 @@ void Raft::SendTimeoutNow(uint64_t to) {
     Send(msg);
 }
 
-seastar::future<int> Raft::Step(MessagePtr m) {
+seastar::future<Status<>> Raft::Step(MessagePtr m) {
+    Status<> s;
     if (m->term == 0) {
     } else if (m->term > term_) {
         if (m->type == MessageType::MsgVote ||
@@ -1445,21 +1428,19 @@ seastar::future<int> Raft::Step(MessagePtr m) {
                             election_elapsed_ < election_timeout_;
             if (!force && in_lease) {
                 auto last_term = co_await raft_log_->LastTerm();
-                RAFT_LOG_INFO(
-                    logger_,
+                LOG_INFO(
                     "[{}-{}] [logterm: {}, index: {}, vote: {}] ignored {} "
                     "from {} [logterm: {}, index: {}] at term {}: lease is "
                     "not expired (remaining ticks: {})",
                     group_, id_, last_term, raft_log_->LastIndex(), vote_,
                     MessageTypeToString(m->type), m->from, m->log_term,
                     m->index, term_, election_timeout_ - election_elapsed_);
-                co_return RAFT_OK;
+                co_return s;
             }
         }
         if (m->type != MessageType::MsgPreVote &&
             !(m->type == MessageType::MsgPreVoteResp && !m->reject)) {
-            RAFT_LOG_INFO(
-                logger_,
+            LOG_INFO(
                 "[{}-{}] [term: {}] received a {} message with higher term "
                 "from {} [term: {}]",
                 group_, id_, term_, MessageTypeToString(m->type), m->from,
@@ -1482,8 +1463,7 @@ seastar::future<int> Raft::Step(MessagePtr m) {
             Send(msg);
         } else if (m->type == MessageType::MsgPreVote) {
             auto last_term = co_await raft_log_->LastTerm();
-            RAFT_LOG_INFO(
-                logger_,
+            LOG_INFO(
                 "[{}-{}] [logterm: {}, index: {}, vote: {}] rejected {} from "
                 "{} [logterm: {}, index: {}] at term {}",
                 group_, id_, last_term, raft_log_->LastIndex(), vote_,
@@ -1496,14 +1476,13 @@ seastar::future<int> Raft::Step(MessagePtr m) {
             msg->reject = true;
             Send(msg);
         } else {
-            RAFT_LOG_INFO(
-                logger_,
+            LOG_INFO(
                 "[{}-{}] [term: {}] ignored a {} message with lower term "
                 "from {} [term: {}]",
                 group_, id_, term_, MessageTypeToString(m->type), m->from,
                 m->term);
         }
-        co_return RAFT_OK;
+        co_return s;
     }
 
     switch (m->type) {
@@ -1523,8 +1502,7 @@ seastar::future<int> Raft::Step(MessagePtr m) {
                 co_await raft_log_->IsUpToDate(m->index, m->log_term);
             uint64_t last_term = co_await raft_log_->LastTerm();
             if (can_vote && is_up_to_date) {
-                RAFT_LOG_INFO(
-                    logger_,
+                LOG_INFO(
                     "[{}-{}] [logterm: {}, index: {}, vote: {}] cast {} for {} "
                     "[logterm: {}, index: {}] at term {}",
                     group_, id_, last_term, raft_log_->LastIndex(), vote_,
@@ -1542,13 +1520,13 @@ seastar::future<int> Raft::Step(MessagePtr m) {
                     vote_ = m->from;
                 }
             } else {
-                RAFT_LOG_INFO(logger_,
-                              "[{}-{}] [logterm: {}, index: {}, vote: {}] "
-                              "rejected {} from {} "
-                              "[logterm: {}, index: {}] at term {}",
-                              group_, id_, last_term, raft_log_->LastIndex(),
-                              vote_, MessageTypeToString(m->type), m->from,
-                              m->log_term, m->index, term_);
+                LOG_INFO(
+                    "[{}-{}] [logterm: {}, index: {}, vote: {}] "
+                    "rejected {} from {} "
+                    "[logterm: {}, index: {}] at term {}",
+                    group_, id_, last_term, raft_log_->LastIndex(), vote_,
+                    MessageTypeToString(m->type), m->from, m->log_term,
+                    m->index, term_);
                 MessagePtr msg = make_raft_message();
                 msg->to = m->from;
                 msg->term = term_;
@@ -1560,18 +1538,18 @@ seastar::future<int> Raft::Step(MessagePtr m) {
             }
         }
         default: {
-            int err = co_await step_(m);
-            if (err != RAFT_OK) {
-                co_return err;
+            s = co_await step_(m);
+            if (!s) {
+                co_return s;
             }
         }
     }
-    co_return RAFT_OK;
+    co_return s;
 }
 
 seastar::future<ConfState> Raft::ApplyConfChange(ConfChangeV2 cc) {
-    auto r = [this, &cc]() -> std::tuple<TrackerConfig, ProgressMap, int> {
-        Changer changer(raft_log_->LastIndex(), prs_, logger_);
+    auto f = [this, &cc]() -> Status<std::tuple<TrackerConfig, ProgressMap>> {
+        Changer changer(raft_log_->LastIndex(), prs_);
         if (cc.LeaveJoint()) {
             return changer.LeaveJoint();
         }
@@ -1584,28 +1562,30 @@ seastar::future<ConfState> Raft::ApplyConfChange(ConfChangeV2 cc) {
         }
 
         return changer.Simple(cc.changes());
-    }();
+    };
 
+    auto s = f();
+
+    if (!s) {
+        LOG_FATAL_THROW("[{}-{}] ApplyConfChange error: {}", group_, id_, s);
+    }
     TrackerConfig cfg;
     ProgressMap prs;
-    int err;
 
-    std::tie(cfg, prs, err) = r;
-    if (err != RAFT_OK) {
-        RAFT_LOG_FATAL(logger_, "[{}-{}] ApplyConfChange error: {}", group_,
-                       id_, raft_error(err));
-    }
-    return SwitchToConfig(std::move(cfg), std::move(prs));
+    std::tie(cfg, prs) = s.Value();
+    auto cs = co_await SwitchToConfig(std::move(cfg), std::move(prs));
+    co_return std::move(cs);
 }
 
-seastar::future<> Raft::Advance(ReadyPtr rd) {
+seastar::future<Status<>> Raft::Advance(ReadyPtr rd) {
+    Status<> s;
     uint64_t new_applied = 0;
 
-    ReduceUncommittedSize(rd->committed_entries);
-    if (rd->committed_entries.size() > 0) {
-        new_applied = rd->committed_entries.back()->index();
-    } else if (rd->snapshot && rd->snapshot->metadata().index() > 0) {
-        new_applied = rd->snapshot->metadata().index();
+    ReduceUncommittedSize(rd->committed_entries_);
+    if (rd->committed_entries_.size() > 0) {
+        new_applied = rd->committed_entries_.back()->index();
+    } else if (rd->snapshot_ && rd->snapshot_->metadata().index() > 0) {
+        new_applied = rd->snapshot_->metadata().index();
     }
 
     if (new_applied > 0) {
@@ -1620,29 +1600,27 @@ seastar::future<> Raft::Advance(ReadyPtr rd) {
             ents.push_back(ent);
             auto ok = co_await AppendEntry(std::move(ents));
             if (!ok) {
-                RAFT_LOG_FATAL(
-                    logger_,
+                LOG_FATAL_THROW(
                     "[{}-{}] refused un-refusable auto-leaving ConfChangeV2",
                     group_, id_);
             }
             pending_conf_index_ = raft_log_->LastIndex();
-            RAFT_LOG_INFO(
-                logger_,
+            LOG_INFO(
                 "[{}-{}] initiating automatic transition out of joint "
                 "configuration {}",
-                group_, id_, prs_->String());
+                group_, id_, *prs_);
         }
     }
 
-    if (rd->entries.size() > 0) {
-        auto e = rd->entries.back();
+    if (rd->entries_.size() > 0) {
+        auto e = rd->entries_.back();
         raft_log_->StableTo(e->index(), e->term());
     }
 
-    if (rd->snapshot && rd->snapshot->metadata().index() != 0) {
-        raft_log_->StableSnapTo(rd->snapshot->metadata().index());
+    if (rd->snapshot_ && rd->snapshot_->metadata().index() != 0) {
+        raft_log_->StableSnapTo(rd->snapshot_->metadata().index());
     }
-    co_return;
+    co_return s;
 }
 
 }  // namespace raft

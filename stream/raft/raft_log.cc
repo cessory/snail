@@ -11,7 +11,7 @@ RaftLog::RaftLog(seastar::shared_ptr<Storage> storage,
                  uint64_t max_next_ents_size, uint64_t group,
                  uint64_t id) noexcept
     : storage_(storage),
-      unstable_(logger, group, id),
+      unstable_(group, id),
       committed_(storage->FirstIndex() - 1),
       applied_(storage->FirstIndex() - 1),
       max_next_ents_size_(max_next_ents_size),
@@ -268,7 +268,7 @@ seastar::future<Status<uint64_t>> RaftLog::Term(uint64_t i) {
     auto r = unstable_.MaybeTerm(i);
     if (std::get<1>(r)) {
         s.SetValue(std::get<0>(r));
-        co_return res;
+        co_return s;
     }
 
     s = co_await storage_->Term(i);

@@ -7,6 +7,7 @@
 
 #include "joint.h"
 #include "progress.h"
+#include "util/status.h"
 #include "util/util.h"
 
 namespace snail {
@@ -74,17 +75,13 @@ class TrackerConfig {
         return cfg;
     }
 
-    friend std::ostream& operator<<(std::ostream& os, const TrackerConfig& x) {
-        os << fmt::format(
-            "voters={}[{}],[{}]{}, learners={}{}{}, learners_next={}{}{}, "
-            "autoleave={}",
-            "{", fmt::join(x.voters_[0], ","), fmt::join(x.voters_[1], ","),
-            "}", "{", fmt::join(x.learners_, ","), "}", "{",
-            fmt::join(x.learners_next_, ","), "}", x.auto_leave_);
-        return os;
-    }
+    friend std::ostream& operator<<(std::ostream& os, const TrackerConfig& x);
 
+#ifdef RAFT_UT_TEST
+   public:
+#else
    protected:
+#endif
     JointConfig voters_;
     bool auto_leave_;
     std::unordered_set<uint64_t> learners_;
@@ -95,6 +92,13 @@ class ProgressTracker;
 using ProgressTrackerPtr = seastar::lw_shared_ptr<ProgressTracker>;
 
 class ProgressTracker : public TrackerConfig {
+#ifdef RAFT_UT_TEST
+   public:
+#endif
+    ProgressMap progress_;
+    std::unordered_map<uint64_t, bool> votes_;
+    size_t max_inflight_;
+
    public:
     explicit ProgressTracker(size_t max_inflight)
         : TrackerConfig(), max_inflight_(max_inflight) {}
@@ -142,10 +146,7 @@ class ProgressTracker : public TrackerConfig {
 
     void set_progress(const ProgressMap& progress);
 
-    SNAIL_PRIVATE
-    ProgressMap progress_;
-    std::unordered_map<uint64_t, bool> votes_;
-    size_t max_inflight_;
+    friend std::ostream& operator<<(std::ostream& os, const ProgressTracker& x);
 };
 
 }  // namespace raft
@@ -155,5 +156,8 @@ class ProgressTracker : public TrackerConfig {
 
 template <>
 struct fmt::formatter<snail::raft::TrackerConfig> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::ProgressTracker> : fmt::ostream_formatter {};
 
 #endif

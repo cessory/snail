@@ -1,7 +1,6 @@
 #pragma once
 #include <fmt/format.h>
-
-#include <ostream>
+#include <fmt/ostream.h>
 
 #include "inflights.h"
 #include "raft_proto.h"
@@ -10,6 +9,9 @@ namespace snail {
 namespace raft {
 
 class Progress {
+#ifdef RAFT_UT_TEST
+   public:
+#endif
     uint64_t match_;
     uint64_t next_;
     StateType state_;
@@ -58,9 +60,7 @@ class Progress {
 
     bool MaybeDecrTo(uint64_t rejected, uint64_t match_hint);
 
-    bool IsPaused();
-
-    std::string String();
+    bool IsPaused() const;
 
     friend std::ostream& operator<<(std::ostream& os, const Progress& pro);
 };

@@ -22,6 +22,7 @@ message(STATUS "SPDK libs:" SPDK_LIBRARIES)
 
 FILE(GLOB util_srcs ${PROJECT_SOURCE_DIR}/util/*.cc)
 FILE(GLOB net_srcs ${PROJECT_SOURCE_DIR}/net/*.cc)
+FILE(GLOB raft_srcs ${PROJECT_SOURCE_DIR}/raft/*.cc)
 
 FILE(GLOB proto_files ${PROJECT_SOURCE_DIR}/proto/*.proto)
 FOREACH(proto_file ${proto_files})
@@ -49,7 +50,11 @@ target_link_libraries(PROTO_OBJS Seastar::seastar)
 add_library(NET_OBJS OBJECT ${net_srcs})
 target_link_libraries(NET_OBJS Seastar::seastar)
 
+add_library(RAFT_OBJS OBJECT ${raft_srcs})
+target_link_libraries(RAFT_OBJS Seastar::seastar)
+
 add_subdirectory(extentnode)
 add_subdirectory(demos)
+add_subdirectory(raft)
 
 

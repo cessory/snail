@@ -9,7 +9,6 @@
 #include "raft_proto.h"
 #include "read_only.h"
 #include "tracker.h"
-#include "util/util.h"
 
 namespace snail {
 namespace raft {
@@ -20,6 +19,7 @@ struct SoftState {
 };
 
 class Raft;
+class RawNode;
 
 class Ready {
     std::optional<SoftState> st_;
@@ -34,6 +34,7 @@ class Ready {
 
    public:
     friend class Raft;
+    friend class RawNode;
     Ready() = default;
 
     std::optional<SoftState> GetSoftState() { return st_; }
@@ -55,10 +56,10 @@ class Ready {
 
 using ReadyPtr = seastar::lw_shared_ptr<Ready>;
 
-class RawNode;
-
 class Raft {
-    SNAIL_PRIVATE
+#ifdef RAFT_UT_TEST
+   public:
+#endif
     uint64_t group_;
     uint64_t id_;
     uint64_t term_;
@@ -123,8 +124,11 @@ class Raft {
 
     bool HasLeader() { return lead_ != 0; }
 
-    SNAIL_PRIVATE
-
+#ifdef RAFT_UT_TEST
+   public:
+#else
+   private:
+#endif
     bool Validate(const Config& c);
 
     seastar::future<ConfState> SwitchToConfig(TrackerConfig cfg,

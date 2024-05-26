@@ -5,6 +5,16 @@
 namespace snail {
 namespace raft {
 
+std::ostream& operator<<(std::ostream& os, const TrackerConfig& x) {
+    os << fmt::format(
+        "voters={}[{}],[{}]{}, learners={}{}{}, learners_next={}{}{}, "
+        "autoleave={}",
+        "{", fmt::join(x.voters_[0], ","), fmt::join(x.voters_[1], ","), "}",
+        "{", fmt::join(x.learners_, ","), "}", "{",
+        fmt::join(x.learners_next_, ","), "}", x.auto_leave_);
+    return os;
+}
+
 ConfState ProgressTracker::GetConfState() {
     ConfState cs;
     cs.set_voters(MajorityConfig2Slice(voters_[0]));
@@ -184,6 +194,15 @@ void ProgressTracker::set_config(const TrackerConfig& cfg) {
 
 void ProgressTracker::set_progress(const ProgressMap& progress) {
     progress_ = progress;
+}
+std::ostream& operator<<(std::ostream& os, const ProgressTracker& x) {
+    os << fmt::format(
+        "voters={}[{}],[{}]{}, learners={}{}{}, learners_next={}{}{}, "
+        "autoleave={}",
+        "{", fmt::join(x.voters_[0], ","), fmt::join(x.voters_[1], ","), "}",
+        "{", fmt::join(x.learners_, ","), "}", "{",
+        fmt::join(x.learners_next_, ","), "}", x.auto_leave_);
+    return os;
 }
 
 }  // namespace raft

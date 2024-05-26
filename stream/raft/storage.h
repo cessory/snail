@@ -51,8 +51,9 @@ class Storage {
 using StoragePtr = seastar::shared_ptr<Storage>;
 
 class MemoryStorage : public Storage {
-    SNAIL_PRIVATE
-
+#ifdef RAFT_UT_TEST
+   public:
+#endif
     HardState hs_;
     SnapshotPtr snapshot_;
     std::deque<EntryPtr> ents_;

@@ -1,5 +1,9 @@
 #pragma once
 
+#include <fmt/format.h>
+#include <fmt/ostream.h>
+
+#include <ostream>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/temporary_buffer.hh>
 
@@ -34,6 +38,11 @@ enum class EntryType {
     EntryConfChange = 1,    // corresponds to ConfChange
     EntryConfChangeV2 = 2,  // corresponds to ConfChangeV2
 };
+
+std::ostream& operator<<(std::ostream& os, const StateType& type);
+std::ostream& operator<<(std::ostream& os, const RaftState& rs);
+std::ostream& operator<<(std::ostream& os, const CampaignType& type);
+std::ostream& operator<<(std::ostream& os, const EntryType& type);
 
 class Entry {
     EntryType type_;
@@ -344,6 +353,8 @@ enum class MessageType {
 
 const char* MessageTypeToString(const MessageType type);
 
+std::ostream& operator<<(std::ostream& os, const MessageType& type);
+
 inline bool IsLocalMsg(MessageType t) {
     return (t == MessageType::MsgHup || t == MessageType::MsgBeat ||
             t == MessageType::MsgUnreachable ||
@@ -560,7 +571,7 @@ class ConfChange {
     seastar::temporary_buffer<char>& context() { return context_; }
     const seastar::temporary_buffer<char>& context() const { return context_; }
 
-    std::string String();
+    friend std::ostream& operator<<(std::ostream& os, const ConfChange& cc);
 };
 
 class ConfChangeSingle {
@@ -680,13 +691,12 @@ class ConfChangeV2 {
         context_ = std::move(c);
     }
 
-    std::string String();
+    friend std::ostream& operator<<(std::ostream& os, const ConfChangeV2& cc);
 };
 
 class ConfChangeI {
     ConfChange v1_;
     ConfChangeV2 v2_;
-
     bool is_v1_;
 
    public:
@@ -727,10 +737,36 @@ class ConfChangeI {
 
     bool IsV1() const { return is_v1_; }
 
-    std::string String();
+    friend std::ostream& operator<<(std::ostream& os, const ConfChangeI& cc);
 
     seastar::temporary_buffer<char> Marshal();
 };
 
 }  // namespace raft
 }  // namespace snail
+
+#if FMT_VERSION >= 90000
+template <>
+struct fmt::formatter<snail::raft::StateType> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::RaftState> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::CampaignType> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::MessageType> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::EntryType> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::ConfChange> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::ConfChangeV2> : fmt::ostream_formatter {};
+
+template <>
+struct fmt::formatter<snail::raft::ConfChangeI> : fmt::ostream_formatter {};
+#endif

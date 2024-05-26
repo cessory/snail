@@ -4,7 +4,6 @@
 #include "log_unstable.h"
 #include "storage.h"
 #include "util/status.h"
-#include "util/util.h"
 
 namespace snail {
 namespace raft {
@@ -13,7 +12,9 @@ class RaftLog;
 using RaftLogPtr = seastar::lw_shared_ptr<RaftLog>;
 
 class RaftLog {
-    SNAIL_PRIVATE
+#ifdef RAFT_UT_TEST
+   public:
+#endif
     seastar::shared_ptr<Storage> storage_;
     Unstable unstable_;
     uint64_t committed_;

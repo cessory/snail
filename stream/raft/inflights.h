@@ -3,13 +3,13 @@
 #include <cstdint>
 #include <vector>
 
-#include "util/util.h"
-
 namespace snail {
 namespace raft {
 
 class Inflights {
-    SNAIL_PRIVATE
+#ifdef RAFT_UT_TEST
+   public:
+#endif
 
     size_t head_;
     size_t tail_;
@@ -28,9 +28,9 @@ class Inflights {
 
     void Add(uint64_t inflight);
 
-    bool Full();
+    bool Full() const;
 
-    size_t Count();
+    size_t Count() const;
 
     void Reset();
 

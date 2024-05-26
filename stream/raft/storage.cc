@@ -1,7 +1,8 @@
 #include "storage.h"
 
-#include "logger.h"
-#include "raft_errno.h"
+#include <seastar/core/coroutine.hh>
+
+#include "util/logger.h"
 
 namespace snail {
 namespace raft {
@@ -73,18 +74,17 @@ seastar::future<Status<uint64_t>> MemoryStorage::Term(uint64_t i) {
 uint64_t MemoryStorage::LastIndex() { return lastIndex(); }
 uint64_t MemoryStorage::FirstIndex() { return firstIndex(); }
 
-seastar::future<Result<SnapshotPtr>> MemoryStorage::Snapshot() {
-    Result<SnapshotPtr> res;
-    res.val = snapshot_;
-    res.err = RAFT_OK;
-    return seastar::make_ready_future<Result<SnapshotPtr>>(res);
+seastar::future<Status<SnapshotPtr>> MemoryStorage::Snapshot() {
+    Status<SnapshotPtr> s;
+    s.SetValue(snapshot_);
+    co_return s;
 }
 
 Status<> MemoryStorage::ApplySnapshot(SnapshotPtr s) {
-    Status<> s;
+    Status<> st;
     if (snapshot_->metadata().index() >= s->metadata().index()) {
-        s.Set(ErrCode::ErrRaftSnapOutOfData);
-        return s;
+        st.Set(ErrCode::ErrRaftSnapOutOfData);
+        return st;
     }
     snapshot_ = s;
     ents_.clear();
@@ -92,7 +92,7 @@ Status<> MemoryStorage::ApplySnapshot(SnapshotPtr s) {
     ent->set_term(s->metadata().term());
     ent->set_index(s->metadata().index());
     ents_.push_back(ent);
-    return s;
+    return st;
 }
 
 Status<SnapshotPtr> MemoryStorage::CreateSnapshot(

@@ -3,14 +3,14 @@
 #include <tuple>
 
 #include "raft_proto.h"
-#include "util/util.h"
 
 namespace snail {
 namespace raft {
 
 class Unstable {
-    SNAIL_PRIVATE
-
+#ifdef RAFT_UT_TEST
+   public:
+#endif
     uint64_t group_;
     uint64_t id_;
     SnapshotPtr snapshot_;

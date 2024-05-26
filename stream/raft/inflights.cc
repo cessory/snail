@@ -32,9 +32,9 @@ void Inflights::Add(uint64_t inflight) {
     count_++;
 }
 
-bool Inflights::Full() { return count_ == buffer_.size(); }
+bool Inflights::Full() const { return count_ == buffer_.size(); }
 
-size_t Inflights::Count() { return count_; }
+size_t Inflights::Count() const { return count_; }
 
 void Inflights::Reset() {
     head_ = 0;

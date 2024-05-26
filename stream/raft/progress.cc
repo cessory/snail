@@ -130,7 +130,7 @@ bool Progress::MaybeDecrTo(uint64_t rejected, uint64_t match_hint) {
     return true;
 }
 
-bool Progress::IsPaused() {
+bool Progress::IsPaused() const {
     switch (state_) {
         case StateType::StateProbe:
             return probe_sent_;
@@ -147,24 +147,24 @@ bool Progress::IsPaused() {
 std::ostream& operator<<(std::ostream& os, const Progress& pro) {
     fmt::memory_buffer out;
     fmt::format_to(std::back_inserter(out), "{} match={} next={}",
-                   static_cast<int>(state_), match_, next_);
-    if (is_learner_) {
+                   static_cast<int>(pro.state_), pro.match_, pro.next_);
+    if (pro.is_learner_) {
         fmt::format_to(std::back_inserter(out), " learner");
     }
-    if (IsPaused()) {
+    if (pro.IsPaused()) {
         fmt::format_to(std::back_inserter(out), " paused");
     }
-    if (pending_snapshot_ > 0) {
+    if (pro.pending_snapshot_ > 0) {
         fmt::format_to(std::back_inserter(out), " pendingSnap={}",
-                       pending_snapshot_);
+                       pro.pending_snapshot_);
     }
-    if (!recent_active_) {
+    if (!pro.recent_active_) {
         fmt::format_to(std::back_inserter(out), " inactive");
     }
-    if (inflights_.Count() > 0) {
+    if (pro.inflights_.Count() > 0) {
         fmt::format_to(std::back_inserter(out), " inflight={}",
-                       inflights_.Count());
-        if (inflights_.Full()) {
+                       pro.inflights_.Count());
+        if (pro.inflights_.Full()) {
             fmt::format_to(std::back_inserter(out), "[full]");
         }
     }

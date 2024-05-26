@@ -11,79 +11,82 @@ namespace snail {
 namespace raft {
 
 struct BasicStatus {
-  uint64_t id;
-  HardState hs;
-  SoftState st;
-  uint64_t applied;
-  uint64_t lead_transferee;
+    uint64_t id;
+    HardState hs;
+    SoftState st;
+    uint64_t applied;
+    uint64_t lead_transferee;
 };
 
-struct Status : public BasicStatus {
-  TrackerConfig cfg;
-  ProgressMap prs;
+struct RaftStatus : public BasicStatus {
+    TrackerConfig cfg;
+    ProgressMap prs;
 };
 
 enum class ProgressType {
-  ProgressTypePeer = 0,
-  ProgressTypeLearner = 1,
+    ProgressTypePeer = 0,
+    ProgressTypeLearner = 1,
 };
 
 enum class SnapshotStatus {
-  SnapshotFinish = 1,
-  SnapshotFailure = 2,
+    SnapshotFinish = 1,
+    SnapshotFailure = 2,
 };
 
 class RawNode {
-  RaftPtr raft_;
-  SoftState prev_soft_state_;
-  HardState prev_hard_state_;
+    RaftPtr raft_;
+    SoftState prev_soft_state_;
+    HardState prev_hard_state_;
+    bool abort_ = false;
 
- public:
-  explicit RawNode(spdlog::logger* l) {
-    raft_ = seastar::make_lw_shared<Raft>(l);
-    memset(&prev_soft_state_, 0, sizeof(prev_soft_state_));
-    memset(&prev_hard_state_, 0, sizeof(prev_hard_state_));
-  }
+   public:
+    explicit RawNode() {
+        raft_ = seastar::make_lw_shared<Raft>();
+        memset(&prev_soft_state_, 0, sizeof(prev_soft_state_));
+        memset(&prev_hard_state_, 0, sizeof(prev_hard_state_));
+    }
 
-  RaftPtr GetRaft() { return raft_; }
+    RaftPtr GetRaft() { return raft_; }
 
-  seastar::future<int> Init(const Raft::Config cfg);
+    seastar::future<Status<>> Init(const Raft::Config cfg);
 
-  seastar::future<> Tick();
+    seastar::future<Status<>> Tick();
 
-  seastar::future<int> Campaign();
+    seastar::future<Status<>> Campaign();
 
-  seastar::future<int> Propose(seastar::temporary_buffer<char> data);
+    seastar::future<Status<>> Propose(seastar::temporary_buffer<char> data);
 
-  seastar::future<int> ProposeConfChange(ConfChangeI cc);
+    seastar::future<Status<>> ProposeConfChange(ConfChangeI cc);
 
-  seastar::future<ConfState> ApplyConfChange(ConfChangeI cc);
+    seastar::future<Status<ConfState>> ApplyConfChange(ConfChangeI cc);
 
-  seastar::future<int> Step(MessagePtr m);
+    seastar::future<Status<>> Step(MessagePtr m);
 
-  seastar::future<ReadyPtr> GetReady(const SoftState st, const HardState hs);
+    seastar::future<Status<ReadyPtr>> GetReady(const SoftState st,
+                                               const HardState hs);
 
-  bool HasReady();
+    bool HasReady();
 
-  seastar::future<> Advance(ReadyPtr rd);
+    seastar::future<Status<>> Advance(ReadyPtr rd);
 
-  BasicStatus GetBasicStatus();
+    BasicStatus GetBasicStatus();
 
-  Status GetStatus();
+    RaftStatus GetStatus();
 
-  void WithProgress(std::function<void(uint64_t id, ProgressType typ,
-                                       ProgressPtr pr)> const& visitor);
+    void WithProgress(std::function<void(uint64_t id, ProgressType typ,
+                                         ProgressPtr pr)> const& visitor);
 
-  seastar::future<int> ReportUnreachable(uint64_t id);
+    seastar::future<Status<>> ReportUnreachable(uint64_t id);
 
-  seastar::future<int> ReportSnapshot(uint64_t id, SnapshotStatus status);
+    seastar::future<Status<>> ReportSnapshot(uint64_t id,
+                                             SnapshotStatus status);
 
-  seastar::future<int> TransferLeader(uint64_t transferee);
+    seastar::future<Status<>> TransferLeader(uint64_t transferee);
 
-  seastar::future<int> ReadIndex(seastar::temporary_buffer<char> rctx);
+    seastar::future<Status<>> ReadIndex(seastar::temporary_buffer<char> rctx);
 
- private:
-  ProgressMap GetProgressCopy();
+   private:
+    ProgressMap GetProgressCopy();
 };
 
 using RawNodePtr = seastar::lw_shared_ptr<RawNode>;

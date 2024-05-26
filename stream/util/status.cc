@@ -30,6 +30,13 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::ErrRaftProposalDropped, "raft proposal dropped"},
     {ErrCode::ErrRaftTransfering, "raft is transfering leadership"},
     {ErrCode::ErrRaftIslearner, "node is learner"},
+    {ErrCode::ErrRaftLeadtransferProgressing,
+     "transfer leadership is in progress"},
+    {ErrCode::ErrRaftLeadtransferSelf, "transfer leadership to self"},
+    {ErrCode::ErrRaftNoLeader, "no leader"},
+    {ErrCode::ErrRaftStepLocalMsg, "step local msg"},
+    {ErrCode::ErrRaftStepPeerNotFound, "raft peer not found"},
+    {ErrCode::ErrRaftAbort, "raft abort"},
     {ErrCode::ErrUnExpect, "unexpect error"},
 };
 
