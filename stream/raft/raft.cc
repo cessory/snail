@@ -221,13 +221,14 @@ seastar::future<bool> Raft::MaybeCommit() {
 }
 
 seastar::future<Status<>> Raft::BcastAppend() {
-    return prs_->AsyncVisit(
+    auto s = co_await prs_->AsyncVisit(
         [this](uint64_t id, ProgressPtr pr) -> seastar::future<Status<>> {
             if (id_ == id) {
                 return seastar::make_ready_future<Status<>>();
             }
             return SendAppend(id);
         });
+    co_return s;
 }
 
 void Raft::BcastHeartbeat() {

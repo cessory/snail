@@ -5,6 +5,7 @@
 
 #include "raft/raft.h"
 #include "raft_test.h"
+#include "util/logger.h"
 namespace snail {
 namespace raft {
 
@@ -38,18 +39,22 @@ static void testUpdateTermFromMessage(snail::raft::RaftState state) {
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerUpdateTermFromMessageTest) {
+    LOG_INFO("FollowerUpdateTermFromMessageTest...");
     testUpdateTermFromMessage(snail::raft::RaftState::StateFollower);
 }
 
 SEASTAR_THREAD_TEST_CASE(CandidateUpdateTermFromMessageTest) {
+    LOG_INFO("CandidateUpdateTermFromMessageTest...");
     testUpdateTermFromMessage(snail::raft::RaftState::StateCandidate);
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderUpdateTermFromMessageTest) {
+    LOG_INFO("LeaderUpdateTermFromMessageTest...");
     testUpdateTermFromMessage(snail::raft::RaftState::StateLeader);
 }
 
 SEASTAR_THREAD_TEST_CASE(RejectStaleTermMessageTest) {
+    LOG_INFO("RejectStaleTermMessageTest...");
     bool called = false;
     auto store = newTestMemoryStorage();
     seastar::shared_ptr<snail::raft::MemoryStorage> ptr =
@@ -76,6 +81,7 @@ SEASTAR_THREAD_TEST_CASE(RejectStaleTermMessageTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(StartAsFollowerTest) {
+    LOG_INFO("StartAsFollowerTest...");
     auto store = newTestMemoryStorage();
     seastar::shared_ptr<snail::raft::MemoryStorage> ptr =
         seastar::dynamic_pointer_cast<snail::raft::MemoryStorage>(store);
@@ -87,6 +93,7 @@ SEASTAR_THREAD_TEST_CASE(StartAsFollowerTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderBcastBeatTest) {
+    LOG_INFO("LeaderBcastBeatTest...");
     int hi = 1;
     auto store = newTestMemoryStorage();
     seastar::shared_ptr<snail::raft::MemoryStorage> ptr =
@@ -166,14 +173,17 @@ static void testNonleaderStartElection(snail::raft::RaftState state) {
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerStartElectionTest) {
+    LOG_INFO("FollowerStartElectionTest...");
     testNonleaderStartElection(snail::raft::RaftState::StateFollower);
 }
 
 SEASTAR_THREAD_TEST_CASE(CandidateStartElectionTest) {
+    LOG_INFO("CandidateStartElectionTest...");
     testNonleaderStartElection(snail::raft::RaftState::StateCandidate);
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderElectionInOneRoundRPCTest) {
+    LOG_INFO("LeaderElectionInOneRoundRPCTest...");
     struct testItem {
         int size;
         std::unordered_map<uint64_t, bool> votes;
@@ -233,6 +243,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderElectionInOneRoundRPCTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerVoteTest) {
+    LOG_INFO("FollowerVoteTest...");
     struct testItem {
         uint64_t vote;
         uint64_t nvote;
@@ -273,6 +284,7 @@ SEASTAR_THREAD_TEST_CASE(FollowerVoteTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(CandidateFallbackTest) {
+    LOG_INFO("CandidateFallbackTest...");
     std::vector<snail::raft::MessagePtr> tests;
     for (int i = 0; i < 2; i++) {
         auto m = snail::raft::make_raft_message();
@@ -339,11 +351,13 @@ static void testNonleaderElectionTimeoutRandomized(
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerElectionTimeoutRandomizedTest) {
+    LOG_INFO("FollowerElectionTimeoutRandomizedTest...");
     testNonleaderElectionTimeoutRandomized(
         snail::raft::RaftState::StateFollower);
 }
 
 SEASTAR_THREAD_TEST_CASE(CandidateElectionTimeoutRandomizedTest) {
+    LOG_INFO("CandidateElectionTimeoutRandomizedTest...");
     testNonleaderElectionTimeoutRandomized(
         snail::raft::RaftState::StateCandidate);
 }
@@ -396,11 +410,13 @@ static void testNonleadersElectionTimeoutNonconflict(
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowersElectionTimeoutNonconflictTest) {
+    LOG_INFO("FollowersElectionTimeoutNonconflictTest...");
     testNonleadersElectionTimeoutNonconflict(
         snail::raft::RaftState::StateFollower);
 }
 
 SEASTAR_THREAD_TEST_CASE(CandidatesElectionTimeoutNonconflictTest) {
+    LOG_INFO("CandidatesElectionTimeoutNonconflictTest...");
     testNonleadersElectionTimeoutNonconflict(
         snail::raft::RaftState::StateCandidate);
 }
@@ -434,6 +450,7 @@ static void commitNoopEntry(snail::raft::RaftPtr r,
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderStartReplicationTest) {
+    LOG_INFO("LeaderStartReplicationTest...");
     auto store = newTestMemoryStorage();
     seastar::shared_ptr<snail::raft::MemoryStorage> ptr =
         seastar::dynamic_pointer_cast<snail::raft::MemoryStorage>(store);
@@ -486,6 +503,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderStartReplicationTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderCommitEntryTest) {
+    LOG_INFO("LeaderCommitEntryTest...");
     auto store = newTestMemoryStorage();
     seastar::shared_ptr<snail::raft::MemoryStorage> ptr =
         seastar::dynamic_pointer_cast<snail::raft::MemoryStorage>(store);
@@ -535,6 +553,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderCommitEntryTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderAcknowledgeCommitTest) {
+    LOG_INFO("LeaderAcknowledgeCommitTest...");
     struct testItem {
         int size;
         std::unordered_map<uint64_t, bool> acceptors;
@@ -585,6 +604,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderAcknowledgeCommitTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderCommitPrecedingEntriesTest) {
+    LOG_INFO("LeaderCommitPrecedingEntriesTest...");
     std::vector<std::vector<snail::raft::EntryPtr>> tests;
     std::vector<snail::raft::EntryPtr> ents;
     snail::raft::EntryPtr ent;
@@ -658,6 +678,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderCommitPrecedingEntriesTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerCommitEntryTest) {
+    LOG_INFO("FollowerCommitEntryTest...");
     struct testItem {
         std::vector<snail::raft::EntryPtr> ents;
         uint64_t commit;
@@ -739,6 +760,7 @@ SEASTAR_THREAD_TEST_CASE(FollowerCommitEntryTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerCheckMsgAppTest) {
+    LOG_INFO("FollowerCheckMsgAppTest...");
     std::vector<snail::raft::EntryPtr> ents;
     for (int i = 0; i < 2; i++) {
         auto ent = snail::raft::make_entry();
@@ -799,6 +821,7 @@ SEASTAR_THREAD_TEST_CASE(FollowerCheckMsgAppTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(FollowerAppendEntriesTest) {
+    LOG_INFO("FollowerAppendEntriesTest...");
     struct testItem {
         uint64_t index;
         uint64_t term;
@@ -924,6 +947,7 @@ SEASTAR_THREAD_TEST_CASE(FollowerAppendEntriesTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderSyncFollowerLogTest) {
+    LOG_INFO("LeaderSyncFollowerLogTest...");
     std::vector<snail::raft::EntryPtr> ents;
     snail::raft::EntryPtr ent = snail::raft::make_entry();
     ents.push_back(ent);
@@ -1040,6 +1064,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderSyncFollowerLogTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(VoteRequestTest) {
+    LOG_INFO("VoteRequestTest...");
     struct testItem {
         std::vector<snail::raft::EntryPtr> ents;
         uint64_t wterm;
@@ -1102,6 +1127,7 @@ SEASTAR_THREAD_TEST_CASE(VoteRequestTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(VoterTest) {
+    LOG_INFO("VoterTest...");
     struct testItem {
         std::vector<snail::raft::EntryPtr> ents;
         uint64_t logterm;
@@ -1184,6 +1210,7 @@ SEASTAR_THREAD_TEST_CASE(VoterTest) {
 }
 
 SEASTAR_THREAD_TEST_CASE(LeaderOnlyCommitsLogFromCurrentTermTest) {
+    LOG_INFO("LeaderOnlyCommitsLogFromCurrentTermTest...");
     std::vector<snail::raft::EntryPtr> ents;
     for (int i = 0; i < 2; i++) {
         auto ent = snail::raft::make_entry();
