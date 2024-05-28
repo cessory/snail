@@ -59,7 +59,11 @@ class ReadOnly {
 
     ReadOnlyOption option() const { return option_; }
 
+#ifdef RAFT_UT_TEST
+   public:
+#else
    private:
+#endif
     ReadOnlyOption option_;
     std::unordered_map<seastar::sstring, ReadIndexStatusPtr>
         pending_read_index_;

@@ -426,8 +426,8 @@ void Raft::BecomeCandidate() {
 
 seastar::future<Status<>> Raft::BecomeLeader() {
     if (state_ == RaftState::StateFollower) {
-        LOG_FATAL("[{}-{}] invalid transition [follower -> leader]", group_,
-                  id_);
+        LOG_FATAL_THROW("[{}-{}] invalid transition [follower -> leader]",
+                        group_, id_);
     }
 
     step_ = [this](MessagePtr m) -> seastar::future<Status<>> {

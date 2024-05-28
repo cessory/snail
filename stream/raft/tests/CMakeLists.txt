@@ -27,8 +27,8 @@ target_link_libraries(raft_snap_test Seastar::seastar Seastar::seastar_testing)
 add_executable(raft_log_test raft_log_test.cc $<TARGET_OBJECTS:raft_test_obj> $<TARGET_OBJECTS:RAFT_OBJS> $<TARGET_OBJECTS:UTIL_OBJS>)
 target_link_libraries(raft_log_test Seastar::seastar Seastar::seastar_testing)
 
-#add_executable(raft_test raft_test.cc $<TARGET_OBJECTS:raft_test_obj> $<TARGET_OBJECTS:RAFT_OBJS> $<TARGET_OBJECTS:UTIL_OBJS>)
-#target_link_libraries(raft_test common gtest Seastar::seastar Seastar::seastar_testing)
-#
+add_executable(raft_test raft_test.cc $<TARGET_OBJECTS:raft_test_obj> $<TARGET_OBJECTS:RAFT_OBJS> $<TARGET_OBJECTS:UTIL_OBJS>)
+target_link_libraries(raft_test Seastar::seastar Seastar::seastar_testing)
+
 add_executable(raft_proto_test raft_proto_test.cc $<TARGET_OBJECTS:raft_test_obj> $<TARGET_OBJECTS:RAFT_OBJS> $<TARGET_OBJECTS:UTIL_OBJS>)
 target_link_libraries(raft_proto_test Seastar::seastar Seastar::seastar_testing)
