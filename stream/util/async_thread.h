@@ -76,19 +76,17 @@ class AsyncThread {
     ~AsyncThread();
 
     template <typename T>
-    seastar::future<Status<T>> Submit(
-        seastar::noncopyable_function<Status<T>()> func) noexcept {
-        Status<T> s;
+    seastar::future<T> Submit(
+        seastar::noncopyable_function<T()> func) noexcept {
         if (seastar::this_shard_id() == shard_id_) {
-            s = co_await worker_queue_.Submit(std::move(func));
-        } else {
-            s = co_await seastar::smp::submit_to(
-                shard_id_,
-                [this, f = std::move(func)]() -> seastar::future<Status<T>> {
-                    return worker_queue_.Submit(std::move(f));
-                });
+            auto res = co_await worker_queue_.Submit(std::move(func));
+            co_return std::move(res);
         }
-        co_return s;
+        auto res = co_await seastar::smp::submit_to(
+            shard_id_, [this, f = std::move(func)]() -> seastar::future<T> {
+                return worker_queue_.Submit(std::move(f));
+            });
+        co_return std::move(res);
     }
 };
 }  // namespace snail
