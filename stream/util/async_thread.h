@@ -27,26 +27,24 @@ class AsyncThread {
 
         template <typename T>
         struct WorkItemImpl : WorkItem {
-            seastar::noncopyable_function<Status<T>()> func;
-            seastar::promise<Status<T>> pr;
-            Status<T> result;
+            seastar::noncopyable_function<T()> func;
+            seastar::promise<T> pr;
+            std::optional<T> result;
 
             WorkItemImpl(seastar::noncopyable_function<T()> f)
                 : func(std::move(f)) {}
             virtual void Process() override { this->result = this->func(); }
             virtual void Complete() override {
-                this->pr.set_value(std::move(this->result));
+                this->pr.set_value(std::move(*this->result));
             }
-            seastar::future<Status<T>> GetFuture() {
-                return this->pr.get_future();
-            }
+            seastar::future<T> GetFuture() { return this->pr.get_future(); }
         };
 
         WorkQueue();
 
         template <typename T>
-        seastar::future<Status<T>> Submit(
-            seastar::noncopyable_function<Status<T>()> func) noexcept {
+        seastar::future<T> Submit(
+            seastar::noncopyable_function<T()> func) noexcept {
             auto wi = std::make_unique<WorkItemImpl<T>>(std::move(func));
 
             co_await queue_has_room_.wait();
