@@ -6,29 +6,32 @@
 namespace snail {
 namespace stream {
 
+class RaftWalFactory;
+
 class RaftWal {
-    AsyncThread worker_thread_;
-    std::string path_;
+    struct Snapshot {
+        uint64_t index = 0;
+        uint64_t term = 0;
+    };
+    RaftWalFactory* factory_;
+    uint64_t group_ = 0;
     HardState hs_;
-    uint64_t compacted_index_ = 0;
-    uint64_t compacted_term_ = 0;
+    RaftWal::Snapshot snapshot_;
     uint64_t last_index_ = 0;
 
-    rocksdb::DB* db_ = nullptr;
+    explicit RaftWal(RaftWalFactory* factory, uint64_t group);
 
-    explicit RaftWal(const std::string& path);
+    seastar::future<Status<>> LoadHardState();
 
-    bool poll();
-    void work();
-    seastar::future<Status<>> OpenDB();
+    seastar::future<Status<>> LoadSnapshot();
+
+    seastar::future<Status<>> LoadLastIndex();
+
     seastar::future<Status<>> Load();
 
+    friend class RaftWalFactory;
+
    public:
-    ~RaftWal();
-
-    static seastar::future<Status<std::unique_ptr<RaftWal>>> OpenRaftWal(
-        const std::string& path);
-
     HardState GetHardState();
 
     seastar::future<Status<>> Save(std::vector<EntryPtr> entries, HardState hs);
@@ -41,9 +44,28 @@ class RaftWal {
 
     seastar::future<Status<>> Release(uint64_t index);
 
-    seastar::future<Status<>>
+    seastar::future<Status<>> ApplySnapshot(uint64_t index, uint64_t term);
+};
 
-        seastar::future<> Close();
+class RaftWalFactory {
+    AsyncThread worker_thread_;
+    std::string path_;
+    rocksdb::DB* db_ = nullptr;
+
+    explicit RaftWalFactory(const std::string& path);
+
+    seastar::future<Status<>> OpenDB();
+
+    friend class RaftWal;
+
+   public:
+    ~RaftWalFactory();
+
+    static seastar::future<Status<std::unique_ptr<RaftWalFactory>>> Create(
+        const std::string& path);
+
+    seastar::future<Status<std::unique_ptr<RaftWal>>> OpenRaftWal(
+        uint64_t group);
 };
 
 }  // namespace stream
