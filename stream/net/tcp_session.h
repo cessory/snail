@@ -107,7 +107,7 @@ class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
 
     uint64_t ID() const { return sess_id_; }
 
-    Status<> GetStatus() const { return status_; }
+    bool Valid() const { return (!gate_.is_closed() && status_); }
 
     seastar::future<Status<StreamPtr>> OpenStream();
 

@@ -45,6 +45,8 @@ class Stream {
 
     virtual std::string RemoteAddress() const = 0;
 
+    virtual bool Valid() const = 0;
+
     virtual seastar::future<> Close() = 0;
 };
 
@@ -54,7 +56,7 @@ class Session {
    public:
     virtual ~Session() {}
     virtual uint64_t ID() const = 0;
-    virtual Status<> GetStatus() const = 0;
+    virtual bool Valid() const = 0;
     virtual seastar::future<Status<StreamPtr>> OpenStream() = 0;
     virtual seastar::future<Status<StreamPtr>> AcceptStream() = 0;
     virtual size_t Streams() const = 0;

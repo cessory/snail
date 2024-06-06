@@ -69,6 +69,8 @@ class TcpStream : public Stream {
 
     uint32_t ID() const { return id_; }
 
+    bool Valid() const { return !gate_.is_closed(); }
+
     uint32_t MaxFrameSize() const { return frame_size_; }
 
     seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(

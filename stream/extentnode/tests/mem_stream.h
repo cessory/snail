@@ -31,6 +31,7 @@ class MemStream : public net::Stream {
                 server_stream));
     }
     uint32_t ID() const { return 1; }
+    bool Valid() const { return true; }
     uint32_t MaxFrameSize() const { return 131072; }
     seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(
         int timeout = -1) {
