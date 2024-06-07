@@ -63,8 +63,8 @@ SEASTAR_THREAD_TEST_CASE(RejectStaleTermMessageTest) {
     ptr->snapshot_->metadata().conf_state().set_voters(peers);
 
     auto raft = newTestRaft(1, 10, 1, store).get0();
-    raft->step_ = [raft, &called](
-                      snail::raft::MessagePtr m) -> seastar::future<Status<>> {
+    raft->step_ =
+        [&called](snail::raft::MessagePtr m) -> seastar::future<Status<>> {
         called = true;
         return seastar::make_ready_future<Status<>>();
     };
@@ -375,7 +375,7 @@ static void testNonleadersElectionTimeoutNonconflict(
             seastar::dynamic_pointer_cast<snail::raft::MemoryStorage>(store);
         ptr->snapshot_->metadata().conf_state().set_voters(ids);
         auto raft = newTestRaft(ids[i], et, 1, store).get0();
-        rs.push_back(raft);
+        rs.push_back(std::move(raft));
     }
     int conflicts = 0;
     for (int round = 0; round < 1000; round++) {
@@ -434,7 +434,7 @@ static snail::raft::MessagePtr acceptAndReply(snail::raft::MessagePtr m) {
     return msg;
 }
 
-static void commitNoopEntry(snail::raft::RaftPtr r,
+static void commitNoopEntry(snail::raft::Raft* r,
                             seastar::shared_ptr<snail::raft::MemoryStorage> s) {
     BOOST_REQUIRE_EQUAL(r->state_, snail::raft::RaftState::StateLeader);
     r->BcastAppend().get();
@@ -460,7 +460,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderStartReplicationTest) {
 
     raft->BecomeCandidate();
     raft->BecomeLeader().get();
-    commitNoopEntry(raft, ptr);
+    commitNoopEntry(raft.get(), ptr);
 
     auto li = raft->raft_log_->LastIndex();
     auto m = snail::raft::make_raft_message();
@@ -513,7 +513,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderCommitEntryTest) {
 
     raft->BecomeCandidate();
     raft->BecomeLeader().get();
-    commitNoopEntry(raft, ptr);
+    commitNoopEntry(raft.get(), ptr);
     auto li = raft->raft_log_->LastIndex();
     auto m = snail::raft::make_raft_message();
     m->from = 1;
@@ -580,7 +580,7 @@ SEASTAR_THREAD_TEST_CASE(LeaderAcknowledgeCommitTest) {
         auto raft = newTestRaft(1, 10, 1, store).get0();
         raft->BecomeCandidate();
         raft->BecomeLeader().get();
-        commitNoopEntry(raft, ptr);
+        commitNoopEntry(raft.get(), ptr);
         auto li = raft->raft_log_->LastIndex();
         auto m = snail::raft::make_raft_message();
         m->from = 1;

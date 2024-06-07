@@ -138,10 +138,10 @@ StateMachinePtr entsWithConfig(
     if (configFunc) {
         configFunc(&cfg);
     }
-    snail::raft::RaftPtr raft = seastar::make_lw_shared<snail::raft::Raft>();
-    raft->Init(cfg).get();
+    auto st = Raft::Create(cfg).get();
+    RaftPtr raft = std::move(st.Value());
     raft->Reset(terms.back());
-    return RaftSM::MakeStateMachine(raft);
+    return RaftSM::MakeStateMachine(std::move(raft));
 }
 
 StateMachinePtr votedWithConfig(
@@ -156,9 +156,8 @@ StateMachinePtr votedWithConfig(
     if (configFunc) {
         configFunc(&cfg);
     }
-    snail::raft::RaftPtr raft = seastar::make_lw_shared<snail::raft::Raft>();
-    raft->Init(cfg).get();
-    return RaftSM::MakeStateMachine(raft);
+    auto st = Raft::Create(cfg).get();
+    return RaftSM::MakeStateMachine(std::move(st.Value()));
 }
 
 void preVoteConfig(snail::raft::Raft::Config* cfg) { cfg->pre_vote = true; }
@@ -190,12 +189,12 @@ NetworkPtr newNetworkWithConfig(
             if (configFunc) {
                 configFunc(&cfg);
             }
-            auto raft = seastar::make_lw_shared<snail::raft::Raft>();
-            raft->Init(cfg).get();
-            npeers[id] = RaftSM::MakeStateMachine(raft);
+            auto st = Raft::Create(cfg).get();
+            npeers[id] = RaftSM::MakeStateMachine(std::move(st.Value()));
         } else if (peers[i]->Type() == StateMachineType::RaftStateMachine) {
             std::unordered_map<uint64_t, bool> learners;
-            auto raft = seastar::dynamic_pointer_cast<RaftSM>(peers[i])->raft_;
+            auto raft =
+                seastar::dynamic_pointer_cast<RaftSM>(peers[i])->raft_.get();
             for (auto i : raft->prs_->learners()) {
                 learners[i] = true;
             }
@@ -249,9 +248,9 @@ snail::raft::Raft::Config newTestConfig(uint64_t id, int election,
 
 seastar::future<snail::raft::RaftPtr> newTestRaft(
     uint64_t id, int election, int heartbeat, snail::raft::StoragePtr store) {
-    snail::raft::RaftPtr raft = seastar::make_lw_shared<snail::raft::Raft>();
-    co_await raft->Init(newTestConfig(id, election, heartbeat, store));
-    co_return raft;
+    auto s =
+        co_await Raft::Create(newTestConfig(id, election, heartbeat, store));
+    co_return std::move(s.Value());
 }
 
 snail::raft::StoragePtr newTestMemoryStorage() {

@@ -5,14 +5,20 @@
 namespace snail {
 namespace raft {
 
-seastar::future<Status<>> RawNode::Init(const Raft::Config cfg) {
-    auto s = co_await raft_->Init(cfg);
-    if (!s) {
+seastar::future<Status<RawNodePtr>> RawNode::Create(const Raft::Config cfg) {
+    Status<RawNodePtr> s;
+
+    RawNodePtr ptr(new RawNode());
+    auto st = co_await Raft::Create(cfg);
+    if (!st) {
+        s.Set(st.Code(), st.Reason());
         co_return s;
     }
+    ptr->raft_ = std::move(st.Value());
 
-    prev_soft_state_ = raft_->GetSoftState();
-    prev_hard_state_ = raft_->GetHardState();
+    ptr->prev_soft_state_ = ptr->raft_->GetSoftState();
+    ptr->prev_hard_state_ = ptr->raft_->GetHardState();
+    s.SetValue(std::move(ptr));
     co_return s;
 }
 
@@ -137,8 +143,7 @@ seastar::future<Status<>> RawNode::Step(MessagePtr m) {
     co_return s;
 }
 
-seastar::future<Status<ReadyPtr>> RawNode::GetReady(const SoftState st,
-                                                    const HardState hs) {
+seastar::future<Status<ReadyPtr>> RawNode::GetReady() {
     Status<ReadyPtr> s;
     if (abort_) {
         s.Set(ErrCode::ErrRaftAbort);
@@ -151,18 +156,20 @@ seastar::future<Status<ReadyPtr>> RawNode::GetReady(const SoftState st,
         rd->msgs_ = std::move(raft_->msgs_);
 
         auto softSt = raft_->GetSoftState();
-        if (!(softSt.lead == st.lead && softSt.raft_state == st.raft_state)) {
+        if (!(softSt.lead == prev_soft_state_.lead &&
+              softSt.raft_state == prev_soft_state_.raft_state)) {
             rd->st_ = softSt;
         }
         auto hardSt = raft_->GetHardState();
-        if (hardSt != hs) {
+        if (hardSt != prev_hard_state_) {
             rd->hs_ = hardSt;
         }
 
         rd->snapshot_ = raft_->raft_log_->UnstableSnapshot();
         rd->rss_ = std::move(raft_->read_states_);
-        rd->sync_ = !rd->entries_.empty() || hardSt.vote() != hs.vote() ||
-                    hardSt.term() != hs.term();
+        rd->sync_ = !rd->entries_.empty() ||
+                    hardSt.vote() != prev_hard_state_.vote() ||
+                    hardSt.term() != prev_hard_state_.term();
         if (rd->st_) {
             prev_soft_state_ = rd->st_.value();
         }
@@ -231,6 +238,7 @@ seastar::future<Status<>> RawNode::Advance(ReadyPtr rd) {
 BasicStatus RawNode::GetBasicStatus() {
     BasicStatus s;
 
+    s.group = raft_->group_;
     s.id = raft_->id_;
     s.hs = raft_->GetHardState();
     s.st = raft_->GetSoftState();
@@ -242,6 +250,7 @@ BasicStatus RawNode::GetBasicStatus() {
 RaftStatus RawNode::GetStatus() {
     RaftStatus s;
     auto bs = GetBasicStatus();
+    s.group = bs.group;
     s.id = bs.id;
     s.hs = bs.hs;
     s.st = bs.st;

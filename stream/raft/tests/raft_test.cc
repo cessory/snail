@@ -101,8 +101,8 @@ SEASTAR_THREAD_TEST_CASE(ProgressFlowControlTest) {
     cfg.max_inflight_msgs = 3;
     cfg.max_size_per_msg = 2048;
 
-    auto raft = seastar::make_lw_shared<snail::raft::Raft>();
-    raft->Init(cfg).get();
+    auto st = Raft::Create(cfg).get();
+    auto raft = std::move(st.Value());
     raft->BecomeCandidate();
     raft->BecomeLeader().get();
 
@@ -171,8 +171,8 @@ SEASTAR_THREAD_TEST_CASE(UncommittedEntryLimitTest) {
     auto cfg = newTestConfig(1, 5, 1, store);
     cfg.max_inflight_msgs = 2 * 1024;
     cfg.max_uncommitted_entries_size = maxEntrySize;
-    auto raft = seastar::make_lw_shared<snail::raft::Raft>();
-    raft->Init(cfg).get();
+    auto st = Raft::Create(cfg).get();
+    auto raft = std::move(st.Value());
     raft->BecomeCandidate();
     raft->BecomeLeader().get();
     BOOST_REQUIRE_EQUAL(raft->uncommitted_size_, 0);
@@ -551,7 +551,7 @@ SEASTAR_THREAD_TEST_CASE(PreVoteFromAnyStateTest) {
 }
 
 static std::vector<snail::raft::EntryPtr> nextEnts(
-    snail::raft::RaftPtr r, seastar::shared_ptr<snail::raft::MemoryStorage> s) {
+    snail::raft::Raft* r, seastar::shared_ptr<snail::raft::MemoryStorage> s) {
     s->Append(r->raft_log_->UnstableEntries());
     r->raft_log_->StableTo(r->raft_log_->LastIndex(),
                            r->raft_log_->LastTerm().get0());
@@ -654,7 +654,8 @@ SEASTAR_THREAD_TEST_CASE(LogReplicationTest) {
                                 tests[i].wcommitted);
 
             std::vector<snail::raft::EntryPtr> ents;
-            auto entries = nextEnts(sm->raft_, tests[i].net->storage_[id]);
+            auto entries =
+                nextEnts(sm->raft_.get(), tests[i].net->storage_[id]);
             for (auto e : entries) {
                 if (!e->data().empty()) {
                     ents.push_back(e);
@@ -953,14 +954,14 @@ SEASTAR_THREAD_TEST_CASE(DuelingPreCandidatesTest) {
     cfgB.pre_vote = true;
     cfgC.pre_vote = true;
 
-    auto a = seastar::make_lw_shared<snail::raft::Raft>();
-    a->Init(cfgA).get();
+    auto st = Raft::Create(cfgA).get();
+    auto a = std::move(st.Value());
 
-    auto b = seastar::make_lw_shared<snail::raft::Raft>();
-    b->Init(cfgB).get();
+    st = Raft::Create(cfgB).get();
+    auto b = std::move(st.Value());
 
-    auto c = seastar::make_lw_shared<snail::raft::Raft>();
-    c->Init(cfgC).get();
+    st = Raft::Create(cfgC).get();
+    auto c = std::move(st.Value());
 
     auto nt =
         newNetwork({RaftSM::MakeStateMachine(a), RaftSM::MakeStateMachine(b),

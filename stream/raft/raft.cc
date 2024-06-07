@@ -32,17 +32,18 @@ Raft::Raft()
       disable_proposal_forwarding_(0),
       e_(random_dev()) {}
 
-seastar::future<Status<>> Raft::Init(const Config c) {
-    Status<> s;
-    if (!Validate(c)) {
+seastar::future<Status<RaftPtr>> Raft::Create(const Config c) {
+    Status<RaftPtr> s;
+    RaftPtr raft_ptr = seastar::make_lw_shared<Raft>(Raft());
+    if (!raft_ptr->Validate(c)) {
         s.Set(ErrCode::ErrRaftUnvalidata);
         co_return s;
     }
     uint64_t max_committed_size_per_ready =
         c.max_committed_size_per_ready == 0 ? c.max_size_per_msg
                                             : c.max_committed_size_per_ready;
-    raft_log_ = RaftLog::MakeRaftLog(c.storage, max_committed_size_per_ready,
-                                     c.group, c.id);
+    raft_ptr->raft_log_ = RaftLog::MakeRaftLog(
+        c.storage, max_committed_size_per_ready, c.group, c.id);
 
     HardState hs;
     ConfState cs;
@@ -55,24 +56,26 @@ seastar::future<Status<>> Raft::Init(const Config c) {
     }
     std::tie(hs, cs) = st.Value();
 
-    group_ = c.group;
-    id_ = c.id;
-    max_msg_size_ = c.max_size_per_msg;
-    max_uncommitted_size_ = c.max_uncommitted_entries_size == 0
-                                ? std::numeric_limits<uint64_t>::max()
-                                : c.max_uncommitted_entries_size;
-    prs_ = seastar::make_lw_shared<ProgressTracker>(c.max_inflight_msgs);
-    election_timeout_ = c.election_tick;
-    heartbeat_timeout_ = c.heartbeat_tick;
-    check_quorum_ = c.check_quorum;
-    pre_vote_ = c.pre_vote;
-    read_only_ =
+    raft_ptr->group_ = c.group;
+    raft_ptr->id_ = c.id;
+    raft_ptr->max_msg_size_ = c.max_size_per_msg;
+    raft_ptr->max_uncommitted_size_ = c.max_uncommitted_entries_size == 0
+                                          ? std::numeric_limits<uint64_t>::max()
+                                          : c.max_uncommitted_entries_size;
+    raft_ptr->prs_ =
+        seastar::make_lw_shared<ProgressTracker>(c.max_inflight_msgs);
+    raft_ptr->election_timeout_ = c.election_tick;
+    raft_ptr->heartbeat_timeout_ = c.heartbeat_tick;
+    raft_ptr->check_quorum_ = c.check_quorum;
+    raft_ptr->pre_vote_ = c.pre_vote;
+    raft_ptr->read_only_ =
         seastar::make_lw_shared<ReadOnly>(ReadOnly(c.read_only_option));
-    disable_proposal_forwarding_ = c.disable_proposal_forwarding;
-    dist_ = std::make_optional<std::uniform_int_distribution<int>>(
-        0, election_timeout_ - 1);
+    raft_ptr->disable_proposal_forwarding_ = c.disable_proposal_forwarding;
+    raft_ptr->dist_ = std::make_optional<std::uniform_int_distribution<int>>(
+        0, raft_ptr->election_timeout_ - 1);
 
-    Changer chg(raft_log_->LastIndex(), prs_, group_, id_);
+    Changer chg(raft_ptr->raft_log_->LastIndex(), raft_ptr->prs_,
+                raft_ptr->group_, raft_ptr->id_);
     TrackerConfig cfg;
     ProgressMap prs;
 
@@ -83,28 +86,30 @@ seastar::future<Status<>> Raft::Init(const Config c) {
     }
     std::tie(cfg, prs) = st1.Value();
 
-    auto cs1 = co_await SwitchToConfig(cfg, prs);
+    auto cs1 = co_await raft_ptr->SwitchToConfig(cfg, prs);
     if (cs != cs1) {
         s.Set(ErrCode::ErrRaftConfStates);
         co_return s;
     }
 
     if (!hs.Empty()) {
-        LoadState(hs);
+        raft_ptr->LoadState(hs);
     }
 
     if (c.applied > 0) {
-        raft_log_->AppliedTo(c.applied);
+        raft_ptr->raft_log_->AppliedTo(c.applied);
     }
 
-    BecomeFollower(term_, 0);
-    auto last_term = co_await raft_log_->LastTerm();
+    raft_ptr->BecomeFollower(raft_ptr->term_, 0);
+    auto last_term = co_await raft_ptr->raft_log_->LastTerm();
     LOG_INFO(
         "[{}-{}] init raft [peers: {}, term: {}, commit: {}, applied: "
         "{}, lastindex: {}, lastterm: {}]",
-        group_, id_, fmt::join(prs_->VoterNodes(), ","), term_,
-        raft_log_->committed(), raft_log_->applied(), raft_log_->LastIndex(),
-        last_term);
+        raft_ptr->group_, raft_ptr->id_,
+        fmt::join(raft_ptr->prs_->VoterNodes(), ","), raft_ptr->term_,
+        raft_ptr->raft_log_->committed(), raft_ptr->raft_log_->applied(),
+        raft_ptr->raft_log_->LastIndex(), last_term);
+    s.SetValue(std::move(raft_ptr));
     co_return s;
 }
 

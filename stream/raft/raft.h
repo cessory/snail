@@ -14,8 +14,8 @@ namespace snail {
 namespace raft {
 
 struct SoftState {
-    uint64_t lead;
-    RaftState raft_state;
+    uint64_t lead = 0;
+    RaftState raft_state = RaftState::StateFollower;
 };
 
 class Raft;
@@ -56,6 +56,9 @@ class Ready {
 
 using ReadyPtr = seastar::lw_shared_ptr<Ready>;
 
+class Raft;
+using RaftPtr = seastar::lw_shared_ptr<Raft>;
+
 class Raft {
 #ifdef RAFT_UT_TEST
    public:
@@ -91,9 +94,10 @@ class Raft {
     std::default_random_engine e_;
     std::optional<std::uniform_int_distribution<int>> dist_;
 
+    Raft();
+
    public:
     friend class RawNode;
-    friend class Node;
     struct Config {
         uint64_t group = 0;
         uint64_t id = 0;
@@ -111,9 +115,7 @@ class Raft {
         bool disable_proposal_forwarding = false;
     };
 
-    Raft();
-
-    seastar::future<Status<>> Init(const Config c);
+    static seastar::future<Status<RaftPtr>> Create(const Raft::Config c);
 
     seastar::future<Status<>> Step(MessagePtr m);
 
@@ -212,8 +214,6 @@ class Raft {
 
     seastar::future<Status<>> Advance(ReadyPtr rd);
 };
-
-using RaftPtr = seastar::lw_shared_ptr<Raft>;
 
 }  // namespace raft
 }  // namespace snail

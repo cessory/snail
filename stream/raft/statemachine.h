@@ -22,8 +22,10 @@ class Statemachine {
    public:
     virtual seastar::future<Status<>> Apply(Buffer data, uint64_t index) = 0;
 
-    virtual seastar::future<Status<>> ApplyConfChange(ConfChangeV2 cc,
-                                                      uint64_t index) = 0;
+    virtual seastar::future<Status<>> ApplyConfChange(
+        ConfChangeType type, uint64_t node_id, std::string raft_host,
+        uint16_t raft_port, std::string host, uint16_t port,
+        uint64_t index) = 0;
 
     virtual seastar::future<Status<SmSnapshotPtr>> CreateSnapshot() = 0;
 

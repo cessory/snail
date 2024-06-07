@@ -11,6 +11,7 @@ namespace snail {
 namespace raft {
 
 struct BasicStatus {
+    uint64_t group;
     uint64_t id;
     HardState hs;
     SoftState st;
@@ -33,22 +34,19 @@ enum class SnapshotStatus {
     SnapshotFailure = 2,
 };
 
+class RawNode;
+using RawNodePtr = std::unique_ptr<RawNode>;
+
 class RawNode {
     RaftPtr raft_;
     SoftState prev_soft_state_;
     HardState prev_hard_state_;
     bool abort_ = false;
 
+    RawNode() {}
+
    public:
-    explicit RawNode() {
-        raft_ = seastar::make_lw_shared<Raft>();
-        memset(&prev_soft_state_, 0, sizeof(prev_soft_state_));
-        memset(&prev_hard_state_, 0, sizeof(prev_hard_state_));
-    }
-
-    RaftPtr GetRaft() { return raft_; }
-
-    seastar::future<Status<>> Init(const Raft::Config cfg);
+    static seastar::future<Status<RawNodePtr>> Create(const Raft::Config cfg);
 
     seastar::future<Status<>> Tick();
 
@@ -62,8 +60,7 @@ class RawNode {
 
     seastar::future<Status<>> Step(MessagePtr m);
 
-    seastar::future<Status<ReadyPtr>> GetReady(const SoftState st,
-                                               const HardState hs);
+    seastar::future<Status<ReadyPtr>> GetReady();
 
     bool HasReady();
 
@@ -85,11 +82,11 @@ class RawNode {
 
     seastar::future<Status<>> ReadIndex(seastar::temporary_buffer<char> rctx);
 
+    bool HasAbort() const { return abort_; }
+
    private:
     ProgressMap GetProgressCopy();
 };
-
-using RawNodePtr = seastar::lw_shared_ptr<RawNode>;
 
 }  // namespace raft
 }  // namespace snail
