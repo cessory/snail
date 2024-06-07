@@ -42,7 +42,6 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
-                LOG_ERROR("get hard state from wal error: {}", st.ToString());
                 s.Set(ErrCode::ErrUnexpect, st.ToString());
                 return s;
             }
@@ -51,6 +50,7 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
         });
     if (!st) {
         s.Set(st.Code(), st.Reason());
+        LOG_ERROR("get hard state from wal error: {}", s);
         co_return s;
     }
 
@@ -78,7 +78,6 @@ seastar::future<Status<>> RaftWal::LoadSnapshot() {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
-                LOG_ERROR("get snapshot from wal error: {}", st.ToString());
                 s.Set(ErrCode::ErrUnexpect, st.ToString());
                 return s;
             }
@@ -89,6 +88,7 @@ seastar::future<Status<>> RaftWal::LoadSnapshot() {
 
     if (!st) {
         s.Set(st.Code(), st.Reason());
+        LOG_ERROR("get snapshot from wal error: {}", s);
         co_return s;
     }
     if (st.Value().empty()) {  // snapshot is empty
@@ -304,7 +304,6 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
-                LOG_ERROR("get log entry from wal error: {}", st.ToString());
                 s.Set(ErrCode::ErrUnexpect, st.ToString());
                 return s;
             }
@@ -314,6 +313,7 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
         });
     if (!st) {
         s.Set(st.Code(), st.Reason());
+        LOG_ERROR("get log entry from wal error: {}", s);
         co_return s;
     }
 
@@ -429,6 +429,7 @@ seastar::future<Status<>> RaftWal::ApplySnapshot(uint64_t index,
 
     snapshot_.index = index;
     snapshot_.term = term;
+    last_index_ = index;
     co_return s;
 }
 
