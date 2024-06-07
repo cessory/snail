@@ -1,0 +1,16 @@
+syntax="proto3";
+package snail.stream;
+
+message RaftNode {
+    uint64 node_id = 1;
+    string raft_host = 2;
+    uint32 raft_port = 3;
+    string host = 4;
+    uint32 port = 5;
+}
+
+message SnapshotMetaPayload {
+    string name = 1;
+    repeated RaftNode nodes = 2; 
+}
+
