@@ -24,6 +24,7 @@ class RaftSender {
     using ClientPtr = seastar::lw_shared_ptr<Client>;
 
     std::unordered_map<uint64_t, ClientPtr> senders_;
+    seastar::gate gate_;
 
    public:
     void AddRaftNode(uint64_t node_id, const std::string& raft_host,
@@ -35,6 +36,8 @@ class RaftSender {
 
     seastar::future<Status<>> SendSnapshot(uint64_t to, SnapshotPtr snap,
                                            SmSnapshotPtr body);
+
+    seastar::future<> Close();
 };
 
 class RaftReceiver {
@@ -62,6 +65,9 @@ class RaftReceiver {
 
     seastar::future<> Close();
 };
+
+using RaftSenderPtr = seastar::lw_shared_ptr<RaftSender>;
+using RaftReceiverPtr = seastar::lw_shared_ptr<RaftReceiver>;
 
 }  // namespace stream
 }  // namespace snail

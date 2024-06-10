@@ -40,6 +40,10 @@ class RaftWal {
 
     uint64_t LastIndex();
 
+    seastar::future<Status<std::vector<EntryPtr>>> Entries(uint64_t lo,
+                                                           uint64_t hi,
+                                                           size_t max_size);
+
     seastar::future<Status<uint64_t>> Term(uint64_t index);
 
     seastar::future<Status<>> Release(uint64_t index);

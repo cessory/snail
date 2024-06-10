@@ -18,9 +18,13 @@ class RaftServer {
     seastar::gate gate_;
 
     std::queue<ProposeEntry> propose_pending_;
+
+    seastar::condition_variable ready_cv_;
+    seastar::semaphore ready_sem_ = {128};
     std::queue<ReadyPtr> ready_pending_;
     std::queue<ReadyPtr> ready_completed_;
     std::queue<MessagePtr> recv_pending_;
+    std::queue<EntryPtr> conf_change_;
 
     std::optional<seastar::future<Status<>>> conf_change_fu_;
 

@@ -199,6 +199,7 @@ seastar::future<Status<>> RaftSender::Client::SendSnapshot(SnapshotPtr snap,
 seastar::future<> RaftSender::Client::Close() {
     if (sess) {
         co_await sess->Close();
+        sess.reset();
     }
     co_return;
 }
@@ -218,6 +219,7 @@ RaftSender::AddRaftNode(uint64_t node_id, const std::string& raft_host,
 }
 
 seastar::future<> RaftSender::RemoveRaftNode(uint64_t node_id) {
+    seastar::holder holder(gate_);
     auto iter = senders_.find(node_id);
     if (iter == senders_.end()) {
         return;
@@ -229,6 +231,7 @@ seastar::future<> RaftSender::RemoveRaftNode(uint64_t node_id) {
 
 seastar::future<> RaftSender::Send(std::vector<MessagePtr> msgs) {
     std::unordered_map<uint64_t, std::vector<Buffer>> node_msgs;
+    seastar::holder holder(gate_);
     for (int i = 0; i < msgs.size(); i++) {
         if (!msgs[i] || msgs[i]->to == 0) {
             continue;
@@ -272,6 +275,7 @@ seastar::future<Status<>> RaftSender::SendSnapshot(uint64_t to,
                                                    SnapshotPtr snap,
                                                    SmSnapshotPtr body) {
     Status<> s;
+    seastar::holder holder(gate_);
 
     auto iter = sender_.find(to);
     if (iter == sender_.end()) {
@@ -280,6 +284,20 @@ seastar::future<Status<>> RaftSender::SendSnapshot(uint64_t to,
     }
     s = co_await iter->second->SendSnapshot(snap, body);
     co_return s;
+}
+
+seastar::future<> RaftSender::Close() {
+    if (!gate_.is_closed()) {
+        std::vector<seastar::future<>> fu_vec;
+        auto fu = gate_.close();
+        fu_vec.emplace_back(std::move(fu));
+        auto senders = std::move(senders_);
+        for (auto& iter : senders) {
+            auto ft = iter.second->Close();
+            fu_vec.emplace_back(std::move(ft));
+        }
+        co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
+    }
 }
 
 RaftReceiver::RaftReceiver(
@@ -400,6 +418,7 @@ seastar::future<> RaftReceiver::HandleSession(net::SessionPtr sess) {
 }
 
 seastar::future<> RaftReceiver::Start() {
+    seastar::holder holder(gate_);
     try {
         seastar::socket_address sa(seastar::ipv4_addr(host_, port_));
         listen_fd_ = seastar::engine().posix_listen(sa);
@@ -425,6 +444,21 @@ seastar::future<> RaftReceiver::Start() {
         auto sess = snail::net::TcpSession::make_session(opt, conn, false);
         sess_map_[sess->ID()] = sess;
         (void)HandleSession(sess);
+    }
+    co_return;
+}
+
+seastar::future<> RaftReceiver::Close() {
+    if (!gate_.is_closed()) {
+        std::vector<seastar::future<>> fu_vec;
+        listen_fd_.close();
+        auto ft = gate_.close();
+        fu_vec.emplace_back(std::move(ft));
+        for (auto& iter : sess_map_) {
+            auto fu = iter.second->Close();
+            fu_vec.emplace_back(std::move(fu));
+        }
+        co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
     }
     co_return;
 }

@@ -277,6 +277,63 @@ uint64_t RaftWal::FirstIndex() { return snapshot_.index + 1; }
 
 uint64_t RaftWal::LastIndex() { return last_index_; }
 
+seastar::future<Status<std::vector<raft::EntryPtr>>> RaftWal::Entries(
+    uint64_t lo, uint64_t hi, size_t max_size) {
+    Status<std::vector<raft::EntryPtr>> s;
+    std::vector<raft::EntryPtr> ents;
+
+    if (lo >= hi) {
+        s.Set(ErrCode::ErrRaftUnavailable);
+        co_return s;
+    } else if (lo <= snapshot_.index) {
+        s.Set(ErrCode::ErrRaftCompacted);
+        co_return s;
+    }
+
+    if (hi > last_index_ + 1) {
+        s.Set(ErrCode::ErrRaftUnavailable, "hi is out of bound last index");
+        co_return s;
+    }
+
+    s = co_await factory_->worker_thread_.Submit(
+        [this, db = factory_->db_, lo, hi,
+         max_size]() -> Status<std::vector<raft::EntryPtr>> {
+            Status<std::vector<raft::EntryPtr>> s;
+            std::vector<raft::EntryPtr> ents;
+            rocksdb::ReadOptions ro;
+
+            auto lower_key = genLogEntryKey(group_, lo);
+            auto upper_key = genLogEntryKey(group_, hi);
+            rocksdb::Slice lower_bound(lower_key.get(), lower_key.size());
+            rocksdb::Slice upper_bound(upper_key.get(), upper_key.size());
+            ro.iterate_lower_bound = &lower_key;
+            ro.iterate_upper_bound = &upper_key;
+
+            std::unique_ptr<rocksdb::Iterator> iter(db->NewIterator(ro));
+            iter->SeekToFirst();
+            auto st = iter->status();
+            if (!st.ok()) {
+                LOG_ERROR("get entries from wal error: {}", st.ToString());
+                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                return s;
+            }
+            size_t n = 0;
+            for (; iter->Valid(); iter->Next()) {
+                raft::EntryPtr ent = raft::make_entry();
+                auto v = iter->value();
+                Buffer b(v.data(), v.size(), seastar::deleter());
+                ent->Unmarshal(std::move(b));
+                if (ent.data().size() + n > max_size && !ents.empty()) {
+                    break;
+                }
+                ents.push_back(ent);
+            }
+            s.SetValue(std::move(ents));
+            return s;
+        });
+    co_return s;
+}
+
 seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
     Status<uint64_t> s;
     if (index < snapshot_.index) {
