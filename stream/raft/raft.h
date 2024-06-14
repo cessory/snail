@@ -105,12 +105,14 @@ class Raft {
         int heartbeat_tick = 0;
         seastar::shared_ptr<Storage> storage;
         uint64_t applied = 0;
-        uint64_t max_size_per_msg = 0;
-        uint64_t max_committed_size_per_ready = 0;
-        uint64_t max_uncommitted_entries_size = 0;
-        int max_inflight_msgs = 0;
-        bool check_quorum = false;
-        bool pre_vote = false;
+        uint64_t max_size_per_msg = std::numeric_limits<uint64_t>::max();
+        uint64_t max_committed_size_per_ready =
+            std::numeric_limits<uint64_t>::max();
+        uint64_t max_uncommitted_entries_size =
+            std::numeric_limits<uint64_t>::max();
+        int max_inflight_msgs = 1024;
+        bool check_quorum = true;
+        bool pre_vote = true;
         ReadOnlyOption read_only_option = ReadOnlyOption::ReadOnlySafe;
         bool disable_proposal_forwarding = false;
     };

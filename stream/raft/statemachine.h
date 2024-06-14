@@ -13,6 +13,8 @@ class SmSnapshot {
    public:
     virtual const seastar::sstring Name() = 0;
 
+    virtual uint64_t Index() const = 0;
+
     virtual seastar::future<Status<Buffer>> Read() = 0;
 };
 

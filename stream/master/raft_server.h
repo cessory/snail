@@ -1,39 +1,68 @@
 #pragma once
+#include <queue>
+#include <seastar/core/condition-variable.hh>
+#include <seastar/core/future.hh>
+
+#include "raft/raft_proto.h"
+#include "raft/rawnode.h"
+#include "util/util.h"
 
 namespace snail {
 namespace stream {
+
+struct RaftServerOption {
+    uint64_t node_id;
+    uint16_t raft_port;
+    uint32_t tick_interval;  // unit(s)
+    uint32_t heartbeat_tick;
+    uint32_t election_tick;
+    std::string wal_dir;
+};
+
+class RaftServer;
+
+using RaftServerPtr = seastar::lw_shared_ptr<RaftServer>;
 
 class RaftServer {
     struct ProposeEntry {
         Buffer b;
         seastar::promise<Status<>> pr;
     };
-    RawNodePtr raft_node_;
+    uint64_t node_id_;
+    RaftServerOption opt_;
+    raft::RawNodePtr raft_node_;
     RaftReceiverPtr receiver_;
     RaftSenderPtr sender_;
     RaftStoragePtr store_;
-    StatemachinePtr sm_;
+    raft::StatemachinePtr sm_;
     uint64_t lead_ = 0;
-    seastar::condition_variable cv_;
     seastar::gate gate_;
 
-    std::queue<ProposeEntry> propose_pending_;
+    seastar::condition_variable cv_;
+    seastar::condition_variable apply_cv_;
+    seastar::semaphore apply_sem_ = {128};
 
-    seastar::condition_variable ready_cv_;
-    seastar::semaphore ready_sem_ = {128};
-    std::queue<ReadyPtr> ready_pending_;
-    std::queue<ReadyPtr> ready_completed_;
-    std::queue<MessagePtr> recv_pending_;
-    std::queue<EntryPtr> conf_change_;
+    std::queue<ProposeEntry> propose_pending_;
+    std::queue<raft::ReadyPtr> apply_pending_;
+    std::queue<raft::ReadyPtr> apply_completed_;
+    std::queue<raft::MessagePtr> recv_pending_;
+    std::queue<raft::EntryPtr> conf_change_;
+    std::optional<uint64_t> pending_release_index_;
+    std::optional<bool> tick_;
 
     std::optional<seastar::future<Status<>>> conf_change_fu_;
 
-    RaftServer();
+    RaftServer() = default;
 
+    seastar::future<> HandleReady(raft::ReadyPtr rd);
     seastar::future<> Run();
 
+    void ReportSnapshot(raft::SnapshotStatus status);
+
    public:
-    static seastar::future<Status<RaftServerPtr>> Create();
+    static seastar::future<Status<RaftServerPtr>> Create(
+        const RaftServerOption opt, uint64_t applied,
+        std::vector<RaftNode> nodes, raft::StatemachinePtr sm);
 
     seastar::future<Status<>> Propose(Buffer b);
 
@@ -46,7 +75,10 @@ class RaftServer {
 
     seastar::future<Status<>> TransferLeader(uint64_t transferee);
 
-    seastar::future<Status<>> ReadIndex(seastar::temporary_buffer<char> rctx);
+    seastar::future<Status<>> ReadIndex();
+
+    // release the wal that is smaller than index
+    void ReleaseIndex(uint64_t index);
 
     bool HasLeader() { return lead_ != 0; }
 

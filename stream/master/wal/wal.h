@@ -32,17 +32,17 @@ class RaftWal {
     friend class RaftWalFactory;
 
    public:
-    HardState GetHardState();
+    raft::HardState GetHardState();
 
-    seastar::future<Status<>> Save(std::vector<EntryPtr> entries, HardState hs);
+    seastar::future<Status<>> Save(std::vector<raft::EntryPtr> entries,
+                                   raft::HardState hs);
 
     uint64_t FirstIndex();
 
     uint64_t LastIndex();
 
-    seastar::future<Status<std::vector<EntryPtr>>> Entries(uint64_t lo,
-                                                           uint64_t hi,
-                                                           size_t max_size);
+    seastar::future<Status<std::vector<raft::EntryPtr>>> Entries(
+        uint64_t lo, uint64_t hi, size_t max_size);
 
     seastar::future<Status<uint64_t>> Term(uint64_t index);
 
