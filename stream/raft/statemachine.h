@@ -16,6 +16,8 @@ class SmSnapshot {
     virtual uint64_t Index() const = 0;
 
     virtual seastar::future<Status<Buffer>> Read() = 0;
+
+    virtual seastar::future<> Close() = 0;
 };
 
 using SmSnapshotPtr = seastar::shared_ptr<SmSnapshot>;
@@ -31,7 +33,7 @@ class Statemachine {
 
     virtual seastar::future<Status<SmSnapshotPtr>> CreateSnapshot() = 0;
 
-    virtual seastar::future<Status<>> ApplySnapshot(SnapshotMetadata meta,
+    virtual seastar::future<Status<>> ApplySnapshot(SnapshotPtr meta,
                                                     SmSnapshotPtr s) = 0;
 };
 

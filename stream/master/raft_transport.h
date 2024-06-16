@@ -16,7 +16,7 @@ class RaftSender {
         seastar::future<Status<>> Connect();
         seastar::future<> Send(std::vector<Buffer> buffers);
 
-        seastar::future<Status<>> SendSnapshot(SnapshotPtr snap,
+        seastar::future<Status<>> SendSnapshot(raft::MessagePtr msg,
                                                SmSnapshotPtr body);
 
         seastar::future<> Close();
@@ -32,9 +32,11 @@ class RaftSender {
 
     seastar::future<> RemoveRaftNode(uint64_t node_id);
 
-    seastar::future<> Send(std::vector<MessagePtr> msgs);
+    seastar::future<> UpdateRaftNodes(std::vector<RaftNode> nodes);
 
-    seastar::future<Status<>> SendSnapshot(uint64_t to, SnapshotPtr snap,
+    seastar::future<> Send(std::vector<raft::MessagePtr> msgs);
+
+    seastar::future<Status<>> SendSnapshot(raft::MessagePtr msg,
                                            SmSnapshotPtr body);
 
     seastar::future<> Close();
@@ -43,10 +45,10 @@ class RaftSender {
 class RaftReceiver {
     std::string host_;
     uint16_t port_;
-    seastar::nocopyable_function<seastar::future<Status<>>(Buffer)>
-        msg_handle_func_;
-    seastar::nocopyable_function<seastar::future<Status<>>(Buffer)>
-        snap_handle_func_;
+    seastar::nocopyable_function<void(raft::MessagePtr)> msg_handle_func_;
+    seastar::nocopyable_function<seastar::future<Status<>>(
+        raft::SnapshotPtr meta, raft::SmSnapshotPtr body)>
+        apply_snapshot_func_;
     seastar::pollable_fd listen_fd_;
     std::unordered_map<uint64_t, net::SessionPtr> sess_map_;
     seastar::gate gate_;
@@ -56,10 +58,10 @@ class RaftReceiver {
    public:
     explicit RaftReceiver(
         const std::string& host, uint16_t port,
-        seastar::nocopyable_function<seastar::future<Status<>>(Buffer b)>
-            msg_func,
-        seastar::nocopyable_function<seastar::future<Status<>>(Buffer b)>
-            snap_func);
+        seastar::nocopyable_function<void(raft::MessagePtr)> msg_func,
+        seastar::nocopyable_function<seastar::future<Status<>>(
+            raft::SnapshotPtr meta, raft::SmSnapshotPtr body)>
+            apply_snapshot_func);
 
     seastar::future<Status<>> Start();
 

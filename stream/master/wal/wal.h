@@ -66,7 +66,7 @@ class RaftWalFactory {
     ~RaftWalFactory();
 
     static seastar::future<Status<std::unique_ptr<RaftWalFactory>>> Create(
-        const std::string& path);
+        std::string path);
 
     seastar::future<Status<std::unique_ptr<RaftWal>>> OpenRaftWal(
         uint64_t group);

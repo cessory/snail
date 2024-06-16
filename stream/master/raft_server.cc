@@ -3,6 +3,40 @@
 namespace snail {
 namespace stream {
 
+static bool VerifyRaftServerOption(const RaftServerOption& opt) {
+    if (opt.node_id == 0) {
+        LOG_ERROR("invalid node_id={} in RaftServerOption", opt.node_id);
+        return false;
+    }
+
+    if (opt.raft_port == 0) {
+        LOG_ERROR("raft_port={} in RaftServerOption is invalid", opt.raft_port);
+        return false;
+    }
+
+    if (opt.tick_interval == 0) {
+        LOG_ERROR("tick_interval={} in RaftServerOption is invalid",
+                  opt.tick_interval);
+        return false;
+    }
+
+    if (opt.heartbeat_tick == 0) {
+        LOG_ERROR("heartbeat_tick={} in RaftServerOption is invalid",
+                  opt.heartbeat_tick);
+        return false;
+    }
+    if (opt.election_tick <= opt.heartbeat_tick) {
+        LOG_ERROR("election_tick={} in RaftServerOption is invalid",
+                  opt.election_tick);
+        return false;
+    }
+    if (opt.wal_dir.empty()) {
+        LOG_ERROR("wal_dir in RaftServerOption is empty");
+        return false;
+    }
+    return true;
+}
+
 seastar::future<> RaftServer::HandlePropose() {
     std::vector<seastar::promise<Status<>>> promise_vec;
     auto msg = make_raft_message();
@@ -105,9 +139,9 @@ seastar::future<> RaftServer::ApplyLoop() {
     co_return;
 }
 
-seastar::future<> RaftServer::handleSnapshotMsg(raft::MessagePtr msg) {
+seastar::future<> RaftServer::HandleSnapshotMsg(raft::MessagePtr msg) {
     auto snap = msg->snapshot;
-    const Buffer& data = snap->metadata().data();
+    const Buffer& data = snap->data();
     SnapshotMetaPayload payload;
     if (!payload.ParseFromArray(data.get(), data.size())) {
         LOG_ERROR("parse snapshot meta payload error");
@@ -123,10 +157,10 @@ seastar::future<> RaftServer::handleSnapshotMsg(raft::MessagePtr msg) {
         co_return;
     }
 
-    auto s = co_await sender_->SendSnapshot(msg->to, snap, sm_snap);
+    auto s = co_await sender_->SendSnapshot(msg, sm_snap);
     if (!s) {
-        LOG_ERROR("not get snapshot {} to raft node {} error: {}",
-                  payload.name(), msg->to, s);
+        LOG_ERROR("send snapshot {} to raft node {} error: {}", payload.name(),
+                  msg->to, s);
         ReportSnapshot(raft::SnapshotStatus::SnapshotFailure);
         store_->ReleaseSnapshot(payload.name());
         co_return;
@@ -150,7 +184,7 @@ seastar::future<> RaftServer::HandleReady(raft::ReadyPtr rd) {
         }
 
         if (msgs[i]->type == MessageType::MsgSnap) {
-            (void)handleSnapshotMsg(std::move(msgs[i]));
+            (void)HandleSnapshotMsg(std::move(msgs[i]));
             msgs[i] = nullptr;
         }
     }
@@ -252,6 +286,16 @@ seastar::future<> RaftServer::Run() {
                 if (!s) {
                     LOG_FATAL("apply raft snapshot error: {}", s);
                 }
+                store_->SetConfState(snap->metadata().conf_state());
+                SnapshotMetaPayload payload;
+                payload.ParseFromArray(snap->data().get(), snap->data().size());
+                int n = payload.nodes_size();
+                std::vector<RaftNode> nodes;
+                for (int i = 0; i < n; ++i) {
+                    nodes.push_back(payload.nodes(i));
+                }
+                store_->UpdateRaftNodes(nodes);
+                // TODO update store and sender
             }
             auto s = co_await raft_node_->Advance(rd);
             if (!s) {
@@ -270,17 +314,115 @@ seastar::future<> RaftServer::Run() {
     }
 }
 
+void RaftServer::HandleRecvMsg(raft::MessagePtr msg) {
+    recv_pending_.push_back(msg);
+    cv_.signal();
+}
+
+seastar::future<Status<>> RaftServer::ApplySnapshot(raft::SnapshotPtr meta,
+                                                    raft::SmSnapshotPtr body) {
+    return sm_->ApplySnapshot(meta, body);
+}
+
+void RaftServer::ApplySnapshotCompleted(raft::MessagePtr msg) {
+    recv_pending_.push_back(msg);
+    cv_.signal();
+}
+
 seastar::future<Status<RaftServerPtr>> RaftServer::Create(
     const RaftServerOption opt, uint64_t applied, std::vector<RaftNode> nodes,
     raft::StatemachinePtr sm) {
     Status<RaftServerPtr> s;
-    RaftServerPtr ptr = seastar::make_lw_shared<RaftServer>(RaftServer());
+    if (!VerifyRaftServerOption(opt)) {
+        s.Set(EINVAL);
+        co_return s;
+    }
+    if (nodes.empty() || !sm) {
+        LOG_ERROR("nodes is empty or Statemachine is null");
+        s.Set(EINVAL);
+        co_return s;
+    }
 
-    ptr->opt_ = opt;
-    ptr->node_id_ = opt.node_id;
+    RaftServerPtr raft_ptr = seastar::make_lw_shared<RaftServer>(RaftServer());
+
+    // open wal log
+    auto st = co_await RaftWalFactory::Create(opt.wal_dir);
+    if (!st) {
+        LOG_ERROR("create raft wal factory error: {}", st);
+        s.Set(st.Code(), st.Reason());
+        co_return s;
+    }
+    raft_ptr->wal_factory_ = std::move(st.Value());
+    auto st1 = co_await raft_ptr->wal_factory_->OpenRaftWal(0);
+    if (!st1) {
+        LOG_ERROR("create raft wal error: {}", st1);
+        s.Set(st1.Code(), st1.Reason());
+        co_return s;
+    }
+    raft_ptr->sender_ = seastar::make_lw_shared<RaftSender>();
+
+    raft::ConfState cs;
+    seastar::shared_ptr<RaftStorage> store = seastar::make_shared<RaftStorage>(
+        cs, applied, std::move(st1.Value()), sm);
+
+    std::vector<uint64_t> voters;
+    std::vector<uint64_t> learners;
+    std::string local_raft_host;
+    uint16_t local_raft_port;
+    for (int i = 0; i < nodes.size(); ++i) {
+        if (nodes[i].learner()) {
+            learners.push_back(nodes[i].node_id());
+        } else {
+            voters.push_back(nodes[i].node_id());
+        }
+        raft_ptr->sender_->AddRaftNode(nodes[i].node_id(), nodes[i].raft_host(),
+                                       nodes[i].raft_port());
+        RaftNodePtr raft_node_ptr = seastar::make_lw_shared<RaftNode>();
+        raft_node_ptr->set_node_id(nodes[i].node_id());
+        raft_node_ptr->set_raft_host(nodes[i].raft_host());
+        raft_node_ptr->set_raft_port(nodes[i].raft_port());
+        raft_node_ptr->set_host(nodes[i].host());
+        raft_node_ptr->set_port(nodes[i].port());
+        raft_node_ptr->set_learner(nodes[i].learner());
+        store->AddRaftNode(raft_node_ptr);
+        if (nodes[i].node_id() == opt.node_id) {
+            local_raft_host = nodes[i].raft_host();
+            local_raft_port = nodes[i].raft_port();
+        }
+    }
+    // update ConfState
+    cs.set_voters(std::move(voters));
+    cs.set_learners(std::move(learners));
+    store->SetConfState(cs);
+
+    raft_ptr->receiver_ = seastar::make_lw_shared<RaftReceiver>(
+        local_raft_host, local_raft_port,
+        [ptr = raft_ptr.get()](raft::MessagePtr msg) {
+            ptr->HandleRecvMsg(msg);
+        },
+        [ptr = raft_ptr.get()](raft::SnapshotPtr meta, raft::SmSnapshotPtr body)
+            -> seastar::future<Status<>> {
+            return ptr->ApplySnapshot(meta, body);
+        });
+
+    raft_ptr->opt_ = opt;
+    raft_ptr->node_id_ = opt.node_id;
 
     raft::Raft::Config cfg;
+    cfg.id = opt.node_id;
+    cfg.election_tick = opt.election_tick;
+    cfg.heartbeat_tick = opt.heartbeat_tick;
+    cfg.storage = store;
     auto st = co_await raft::RawNode::Create(cfg);
+    if (!st) {
+        LOG_ERROR("create raft raw node error: {}", st);
+        s.Set(st.Code(), st.Reason());
+        co_return s;
+    }
+    raft_ptr->raft_node_ = std::move(st.Value());
+    raft_ptr->receiver_->Start();
+    s.SetValue(raft_ptr);
+    co_return s;
 }
 
 seastar::future<Status<>> RaftServer::Propose(Buffer b) {

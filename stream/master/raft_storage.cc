@@ -124,6 +124,16 @@ void RaftStorage::RemoveRaftNode(uint64_t node_id) {
     raft_node_map_.erase(node_id);
 }
 
+void RaftStorage::UpdateRaftNodes(const std::vector<RaftNode>& nodes) {
+    std::unordered_map<uint64_t, RaftNodePtr> node_map;
+    for (int i = 0; i < nodes.size(); ++i) {
+        RaftNode node = nodes[i];
+        RaftNodePtr node_ptr = seastar::make_lw_shared(std::move(node));
+        node_map[node_ptr->node_id()] = node_ptr;
+    }
+    raft_node_map_ = std::move(node_map);
+}
+
 void RaftStorage::SetApplied(uint64_t applied) { applied_ = applied; }
 
 }  // namespace stream

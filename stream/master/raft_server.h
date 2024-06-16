@@ -11,11 +11,11 @@ namespace snail {
 namespace stream {
 
 struct RaftServerOption {
-    uint64_t node_id;
-    uint16_t raft_port;
-    uint32_t tick_interval;  // unit(s)
-    uint32_t heartbeat_tick;
-    uint32_t election_tick;
+    uint64_t node_id = 0;
+    uint16_t raft_port = 0;
+    uint32_t tick_interval = 1;  // unit(s)
+    uint32_t heartbeat_tick = 2;
+    uint32_t election_tick = 5;
     std::string wal_dir;
 };
 
@@ -30,6 +30,7 @@ class RaftServer {
     };
     uint64_t node_id_;
     RaftServerOption opt_;
+    std::unique_ptr<RaftWalFactory> wal_factory_;
     raft::RawNodePtr raft_node_;
     RaftReceiverPtr receiver_;
     RaftSenderPtr sender_;
@@ -56,6 +57,9 @@ class RaftServer {
 
     seastar::future<> HandleReady(raft::ReadyPtr rd);
     seastar::future<> Run();
+
+    void HandleRecvMsg(raft::MessagePtr msg);
+    seastar::future<Status<>> HandleRecvSnapshot(Buffer b);
 
     void ReportSnapshot(raft::SnapshotStatus status);
 

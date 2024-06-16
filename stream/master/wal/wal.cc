@@ -518,7 +518,7 @@ seastar::future<Status<>> RaftWalFactory::OpenDB() {
 }
 
 seastar::future<Status<std::unique_ptr<RaftWalFactory>>> RaftWalFactory::Create(
-    const std::string& path) {
+    std::string path) {
     Status<std::unique_ptr<RaftWalFactory>> s;
 
     std::unique_ptr<RaftWalFactory> factory =
