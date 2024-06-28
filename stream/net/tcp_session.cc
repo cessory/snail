@@ -66,6 +66,7 @@ SessionPtr TcpSession::make_session(
 seastar::future<> TcpSession::RecvLoop() {
     auto ptr = shared_from_this();
     char hdr[STREAM_HEADER_SIZE];
+    char buffer[4096];
     bool break_loop = false;
     seastar::timer<seastar::steady_clock_type> ping_timer;
     ping_timer.set_callback([this] {
@@ -74,6 +75,9 @@ seastar::future<> TcpSession::RecvLoop() {
     });
     bool wait_ping =
         opt_.keep_alive_enable && opt_.keep_alive_interval > 0 && client_;
+    uint32_t hdr_len = 0;
+    uint32_t buffer_len = 0;
+    uint32_t buffer_pos = 0;
 
     while (!gate_.is_closed() && !break_loop) {
         if (tokens_ < 0) {
@@ -82,19 +86,40 @@ seastar::future<> TcpSession::RecvLoop() {
                 break;
             }
         }
-        if (wait_ping) {
-            ping_timer.arm(std::chrono::seconds(3 * opt_.keep_alive_interval));
-        }
-        auto s = co_await conn_->ReadExactly(hdr, STREAM_HEADER_SIZE);
-        ping_timer.cancel();
-        if (!s) {
-            SetStatus(s.Code(), s.Reason());
-            break;
+        if (buffer_len) {
+            uint32_t n = std::min(buffer_len, STREAM_HEADER_SIZE - hdr_len);
+            if (n) {
+                memcpy(&hdr[hdr_len], &buffer[buffer_pos], n);
+                buffer_len -= n;
+                buffer_pos += n;
+                hdr_len += n;
+                if (buffer_len == 0) {
+                    buffer_pos = 0;
+                }
+            }
+        } else {
+            buffer_pos = 0;
         }
 
-        if (s.Value() == 0) {
-            SetStatus(static_cast<ErrCode>(ECONNABORTED));
-            break;
+        if (hdr_len < STREAM_HEADER_SIZE) {
+            if (wait_ping) {
+                ping_timer.arm(
+                    std::chrono::seconds(3 * opt_.keep_alive_interval));
+            }
+            auto s = co_await conn_->Read(&buffer[buffer_pos],
+                                          sizeof(buffer) - buffer_pos);
+            ping_timer.cancel();
+            if (!s) {
+                SetStatus(s.Code(), s.Reason());
+                break;
+            }
+
+            if (s.Value() == 0) {
+                SetStatus(static_cast<ErrCode>(ECONNABORTED));
+                break;
+            }
+            buffer_len += s.Value();
+            continue;
         }
         Frame f;
         uint32_t len = f.Unmarshal(hdr);
@@ -102,6 +127,7 @@ seastar::future<> TcpSession::RecvLoop() {
             SetStatus(static_cast<ErrCode>(ECONNABORTED));
             break;
         }
+        hdr_len = 0;
         switch (f.cmd) {
             case CmdType::PING:
                 WritePingPong(false);
@@ -137,21 +163,32 @@ seastar::future<> TcpSession::RecvLoop() {
             case CmdType::PSH:
                 if (len > 0) {
                     auto buf = allocator_->Allocate(static_cast<size_t>(len));
-                    if (wait_ping) {
-                        ping_timer.arm(
-                            std::chrono::seconds(3 * opt_.keep_alive_interval));
+                    uint32_t data_len = 0;
+                    if (buffer_len) {
+                        uint32_t n = std::min(buffer_len, len);
+                        memcpy(buf.get_write(), &buffer[buffer_pos], n);
+                        buffer_len -= n;
+                        buffer_pos += n;
+                        data_len += n;
                     }
-                    auto s = co_await conn_->ReadExactly(buf.get_write(),
-                                                         buf.size());
-                    ping_timer.cancel();
-                    if (!s || s.Value() == 0) {
-                        if (!s) {
-                            SetStatus(s.Code(), s.Reason());
-                        } else {
-                            SetStatus(static_cast<ErrCode>(ECONNRESET));
+                    if (len > data_len) {
+                        if (wait_ping) {
+                            ping_timer.arm(std::chrono::seconds(
+                                3 * opt_.keep_alive_interval));
                         }
-                        break_loop = true;
-                    } else {
+                        auto s = co_await conn_->ReadExactly(
+                            buf.get_write() + data_len, len - data_len);
+                        ping_timer.cancel();
+                        if (!s || s.Value() == 0) {
+                            if (!s) {
+                                SetStatus(s.Code(), s.Reason());
+                            } else {
+                                SetStatus(static_cast<ErrCode>(ECONNRESET));
+                            }
+                            break_loop = true;
+                        }
+                    }
+                    if (!break_loop) {
                         auto it = streams_.find(f.sid);
                         if (it != streams_.end()) {
                             auto stream = it->second;
@@ -167,20 +204,32 @@ seastar::future<> TcpSession::RecvLoop() {
                     break_loop = true;
                 } else {
                     char buf[8];
-                    if (wait_ping) {
-                        ping_timer.arm(
-                            std::chrono::seconds(3 * opt_.keep_alive_interval));
+                    uint32_t data_len = 0;
+                    if (buffer_len) {
+                        uint32_t n = std::min(buffer_len, len);
+                        memcpy(buf, &buffer[buffer_pos], n);
+                        buffer_len -= n;
+                        buffer_pos += n;
+                        data_len += n;
                     }
-                    auto s = co_await conn_->ReadExactly(buf, 8);
-                    ping_timer.cancel();
-                    if (!s || s.Value() == 0) {
-                        if (!s) {
-                            SetStatus(s.Code(), s.Reason());
-                        } else {
-                            SetStatus(static_cast<ErrCode>(ECONNRESET));
+                    if (len > data_len) {
+                        if (wait_ping) {
+                            ping_timer.arm(std::chrono::seconds(
+                                3 * opt_.keep_alive_interval));
                         }
-                        break_loop = true;
-                    } else {
+                        auto s = co_await conn_->ReadExactly(&buf[data_len],
+                                                             len - data_len);
+                        ping_timer.cancel();
+                        if (!s || s.Value() == 0) {
+                            if (!s) {
+                                SetStatus(s.Code(), s.Reason());
+                            } else {
+                                SetStatus(static_cast<ErrCode>(ECONNRESET));
+                            }
+                            break_loop = true;
+                        }
+                    }
+                    if (!break_loop) {
                         auto it = streams_.find(f.sid);
                         if (it != streams_.end()) {
                             auto stream = it->second;
