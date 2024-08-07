@@ -183,7 +183,8 @@ seastar::future<Status<>> TcpStream::WriteFrame(const char *b, size_t n) {
 seastar::future<Status<>> TcpStream::WriteFrame(
     seastar::temporary_buffer<char> b) {
     iovec iov = {(void *)b.get_write(), b.size()};
-    auto s = co_await WriteFrame({iov});
+    std::vector<iovec> iovs = {iov};
+    auto s = co_await WriteFrame(std::move(iovs));
     co_return s;
 }
 

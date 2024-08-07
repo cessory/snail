@@ -3,6 +3,7 @@
 #include <netinet/tcp.h>
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/posix.hh>
 namespace snail {
 namespace net {
 
@@ -28,7 +29,10 @@ seastar::future<Status<>> TcpConnection::Write(seastar::net::packet&& p) {
 seastar::future<Status<size_t>> TcpConnection::Read(char* buffer, size_t len) {
     Status<size_t> s;
     try {
+        int val = 1;
         auto n = co_await fd_.read_some(buffer, len);
+        fd_.get_file_desc().setsockopt(IPPROTO_TCP, TCP_QUICKACK, &val,
+                                       sizeof(int));
         s.SetValue(n);
     } catch (std::system_error& e) {
         s.Set(e.code().value());
@@ -50,6 +54,9 @@ seastar::future<Status<size_t>> TcpConnection::ReadExactly(char* buffer,
                 s.SetValue(0);
                 break;
             }
+            int val = 1;
+            fd_.get_file_desc().setsockopt(IPPROTO_TCP, TCP_QUICKACK, &val,
+                                           sizeof(int));
         } catch (std::system_error& e) {
             s.Set(e.code().value());
             co_return s;
