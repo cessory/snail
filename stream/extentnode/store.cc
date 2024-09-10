@@ -641,7 +641,7 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
 }
 
 Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
-                         std::vector<TmpBuffer>& tmp_buf_vec,
+                         std::vector<Buffer>& tmp_buf_vec,
                          std::vector<iovec>& tmp_io_vec,
                          std::string& last_sector_cached_data) {
     Status<> s;
@@ -827,7 +827,7 @@ seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
     std::string last_sector_data = std::move(st.Value());
 
     ChunkEntry chunk = extent_ptr->chunks.back();
-    std::vector<TmpBuffer> tmp_buf_vec;
+    std::vector<Buffer> tmp_buf_vec;
     std::vector<iovec> tmp_io_vec;
     std::vector<ChunkEntry> chunks;
 
@@ -926,7 +926,7 @@ seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
 }
 
 seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
-                                       std::vector<TmpBuffer> buffers) {
+                                       std::vector<Buffer> buffers) {
     std::vector<iovec> iov;
     int n = buffers.size();
 
@@ -938,10 +938,11 @@ seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
     co_return s;
 }
 
-seastar::future<Status<std::vector<TmpBuffer>>> Store::Read(
-    ExtentPtr extent_ptr, uint64_t off, size_t len) {
-    Status<std::vector<TmpBuffer>> s;
-    std::vector<TmpBuffer> result;
+seastar::future<Status<std::vector<Buffer>>> Store::Read(ExtentPtr extent_ptr,
+                                                         uint64_t off,
+                                                         size_t len) {
+    Status<std::vector<Buffer>> s;
+    std::vector<Buffer> result;
 
     if (off % kBlockDataSize) {
         LOG_ERROR("invalid arguments off={} is not align kBlockDataSize", off);
@@ -1030,7 +1031,7 @@ seastar::future<Status<std::vector<TmpBuffer>>> Store::Read(
         result.emplace_back(std::move(buf));
     }
 
-    TmpBuffer& b = result.back();
+    Buffer& b = result.back();
     if (last_block_len) {  // modify the last block crc
         size_t last_block_n = b.size() & kBlockSizeMask;
         if (last_block_n == 0) {

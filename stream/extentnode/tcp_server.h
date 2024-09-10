@@ -16,6 +16,7 @@ class TcpServer {
     unsigned shard_index_;
     std::vector<unsigned> shards_;
     seastar::pollable_fd fd_;
+    // each disk has a service
     std::unordered_map<uint32_t, seastar::foreign_ptr<ServicePtr>> service_map_;
     std::optional<seastar::promise<>> start_pr_;
     std::vector<std::unordered_map<uint64_t, net::SessionPtr>> sess_mgr_;

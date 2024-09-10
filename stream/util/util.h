@@ -1,5 +1,8 @@
 #pragma once
+#include <fmt/format.h>
+
 #include <memory>
+#include <ostream>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/temporary_buffer.hh>
 

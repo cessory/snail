@@ -24,7 +24,7 @@ enum ExtentnodeMsgType {
 }
 
 message WriteExtentReq {
-    CommonReq base = 1;
+    CommonReq header = 1;
     uint32 diskid = 2;
     string extent_id = 3;
     uint64 off = 4;
@@ -32,7 +32,7 @@ message WriteExtentReq {
 }
 
 message ReadExtentReq {
-    CommonReq base = 1;
+    CommonReq header = 1;
     uint32 diskid = 2;
     string extent_id = 3;
     uint64 off = 4;
@@ -40,36 +40,36 @@ message ReadExtentReq {
 }
 
 message ReadExtentResp{
-    CommonResp base = 1;
+    CommonResp header = 1;
     uint64 len = 2;  // exclude crc
 }
 
 message DeleteExtentReq {
-    CommonResp base = 1;
+    CommonResp header = 1;
     uint32 diskid = 2;
     string extent_id = 3;
 }
 
 message CreateExtentReq {
-    CommonResp base = 1;
+    CommonResp header = 1;
     uint32 diskid = 2;
     string extent_id = 3;
 }
 
 message GetExtentReq {
-    CommonResp base = 1;
+    CommonResp header = 1;
     uint32 diskid = 2;
     string extent_id = 3;
 }
 
 message GetExtentResp {
-    CommonResp base = 1;
+    CommonResp header = 1;
     uint64 len = 2;
     uint32 ctime = 3;
 }
 
 message UpdateDiskStatusReq {
-    CommonResp base = 1;
+    CommonResp header = 1;
     uint32 diskid = 2;
     uint32 status = 3;
 }

@@ -1,12 +1,26 @@
 #pragma once
+#include "extentnode_mgr.h"
+#include "id_allocator.h"
 
 namespace snail {
 namespace stream {
 
 class Service {
+    uint32_t timeout_;  // request timeout(ms)
+    uint32_t cluster_id_;
+    RaftServerPtr raft_;
+    IdAllocatorPtr diskid_alloctor_;
+    ExtentnodeMgrPtr extentnode_mgr_;
+
    public:
+    seastar::future<Status<>> HandleMessage(net::Stream* stream, Buffer b);
     // alloca an disk id
-    seastar::future<Status<>> HandleAllocaDiskID();
+    seastar::future<Status<>> HandleAllocaDiskID(const AllocDiskIdReq* req,
+                                                 net::Stream* stream);
+
+    // and an extentnode into cluster
+    seastar::future<Status<>> HandleAddNode(const AddNodeReq* req,
+                                            net::Stream* stream);
 
     // add disk into node
     seastar::future<Status<>> HandleAddDisk();
@@ -18,9 +32,6 @@ class Service {
     seastar::future<Status<>> HandleGetDisksByNodeID();
 
     seastar::future<Status<>> HandleGetNodeHostPortByDiskID();
-
-    // and an extentnode into cluster
-    seastar::future<Status<>> HandleAddNode();
 
     // update an extentnode info
     seastar::future<Status<>> HandleUpdateNode();
@@ -55,6 +66,8 @@ class Service {
 
     seastar::future<Status<>> HandleSealAndCreateExtent();
 };
+
+using ServicePtr = seastar::lw_shared_ptr<Service>;
 
 }  // namespace stream
 }  // namespace snail

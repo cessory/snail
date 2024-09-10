@@ -1,4 +1,6 @@
 #include "util.h"
+
+#include <string_view>
 namespace snail {
 
 seastar::temporary_buffer<char> foreign_buffer_copy(

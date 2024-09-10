@@ -118,6 +118,21 @@ seastar::future<Status<ConfState>> RawNode::ApplyConfChange(ConfChangeI cc) {
     co_return std::move(s);
 }
 
+seastar::future<Status<>> RawNode::RawStep(MessagePtr m) {
+    Status<> s;
+    if (abort_) {
+        s.Set(ErrCode::ErrRaftAbort);
+        co_return s;
+    }
+    try {
+        s = co_await raft_->Step(m);
+    } catch (...) {
+        s.Set(ErrCode::ErrRaftAbort);
+        abort_ = true;
+    }
+    co_return s;
+}
+
 seastar::future<Status<>> RawNode::Step(MessagePtr m) {
     Status<> s;
     if (abort_) {

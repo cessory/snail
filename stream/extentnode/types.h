@@ -26,9 +26,6 @@ constexpr size_t kBlockSizeMask = kBlockSize - 1;
 constexpr size_t kBlockDataSize = 32764;
 constexpr int kLastBlockIndex = 127;  // the last block index in the chunk
 constexpr int kLastSectorIndex = 63;  // the last sector index in the block
-constexpr size_t kMetaMsgHeaderLen = 4 + 2 + 2;  // crc + type + body len
-
-using TmpBuffer = seastar::temporary_buffer<char>;
 
 enum class DevType {
     HDD,

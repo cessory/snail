@@ -7,6 +7,7 @@
 
 #include "net/byteorder.h"
 #include "util/logger.h"
+#include "util/util.h"
 
 namespace snail {
 namespace stream {
@@ -250,7 +251,7 @@ seastar::future<Status<>> Journal::SaveImmuChunks() {
             uint64_t off =
                 super_.pt[CHUNK_PT].start + start_index * kSectorSize;
             fu = seastar::do_with(
-                buffer.share(0, buffer_off), [this, off](TmpBuffer &b) {
+                buffer.share(0, buffer_off), [this, off](Buffer &b) {
                     return dev_ptr_->Write(off, b.get(), b.size());
                 });
             start_index = iter.first;
@@ -309,7 +310,7 @@ seastar::future<Status<>> Journal::SaveImmuExtents() {
             uint64_t off =
                 super_.pt[EXTENT_PT].start + start_index * kSectorSize;
             fu = seastar::do_with(
-                buffer.share(0, buffer_off), [this, off](TmpBuffer &b) {
+                buffer.share(0, buffer_off), [this, off](Buffer &b) {
                     return dev_ptr_->Write(off, b.get(), b.size());
                 });
             start_index = iter.first;
@@ -405,7 +406,7 @@ seastar::future<> Journal::LoopRun() {
         std::queue<worker_item *> tmp_queue;
         uint64_t free_size = super_.pt[current_pt_].start +
                              super_.pt[current_pt_].size - offset_;
-        TmpBuffer buffer = dev_ptr_->Get(std::min(kBlockSize, free_size));
+        Buffer buffer = dev_ptr_->Get(std::min(kBlockSize, free_size));
         memset(buffer.get_write(), 0, buffer.size());
         size_t buffer_len = 0;
 

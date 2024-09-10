@@ -14,52 +14,42 @@
 #include "mem_stream.h"
 #include "net/byteorder.h"
 #include "proto/extentnode.pb.h"
+#include "proto/rpc.h"
 #include "util/logger.h"
 #include "util/util.h"
 
 namespace snail {
 namespace stream {
 
-static bool ParseResponse(const char* p, size_t len,
-                          ::google::protobuf::Message* resp,
+static bool ParseResponse(Buffer b, ::google::protobuf::Message* resp,
                           ExtentnodeMsgType& type) {
-    if (len <= kMetaMsgHeaderLen) {
-        LOG_ERROR("invalid len");
+    auto s = UnmarshalRpcMessage(b.share());
+    if (!s) {
+        LOG_ERROR("parse response error: {}", s);
         return false;
     }
-    uint32_t origin_crc = net::BigEndian::Uint32(p);
-    uint32_t crc = crc32_gzip_refl(0, (const unsigned char*)(p + 4), len - 4);
-    if (origin_crc != crc) {
-        LOG_ERROR("invalid crc");
-        return false;
-    }
-    type = static_cast<ExtentnodeMsgType>(net::BigEndian::Uint16(p + 4));
-    uint16_t body_len = net::BigEndian::Uint16(p + 6);
-    if (body_len + kMetaMsgHeaderLen != len) {
-        LOG_ERROR("invalid body_len={} len={}", body_len, len);
-        return false;
-    }
-    return resp->ParseFromArray(p + kMetaMsgHeaderLen, body_len);
+    b = std::move(std::get<1>(s.Value()));
+    type = static_cast<ExtentnodeMsgType>(std::get<0>(s.Value()));
+    return resp->ParseFromArray(b.get(), b.size());
 }
 
-static seastar::future<Status<TmpBuffer>> ReadFrame(net::Stream* stream,
-                                                    unsigned shard) {
-    Status<TmpBuffer> s;
+static seastar::future<Status<Buffer>> ReadFrame(net::Stream* stream,
+                                                 unsigned shard) {
+    Status<Buffer> s;
     if (seastar::this_shard_id() == shard) {
         s = co_await stream->ReadFrame();
         co_return s;
     }
     auto st = co_await seastar::smp::submit_to(
         shard,
-        [stream]()
-            -> seastar::future<
-                Status<seastar::foreign_ptr<std::unique_ptr<TmpBuffer>>>> {
-            Status<seastar::foreign_ptr<std::unique_ptr<TmpBuffer>>> s;
+        [stream]() -> seastar::future<
+                       Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>>> {
+            Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>> s;
             auto st = co_await stream->ReadFrame();
             s.Set(st.Code(), st.Reason());
             if (st) {
                 s.SetValue(seastar::make_foreign(
-                    std::make_unique<TmpBuffer>(std::move(st.Value()))));
+                    std::make_unique<Buffer>(std::move(st.Value()))));
             }
             co_return std::move(s);
         });
@@ -76,7 +66,7 @@ static seastar::future<Status<std::unique_ptr<GetExtentResp>>> GetExtent(
     net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
 
     std::unique_ptr<GetExtentReq> req(new GetExtentReq);
-    req->mutable_base()->set_reqid("123456");
+    req->mutable_header()->set_reqid("123456");
     req->set_diskid(1);
     req->set_extent_id(std::string(str_extent_id, 16));
 
@@ -88,7 +78,7 @@ static seastar::future<Status<std::unique_ptr<GetExtentResp>>> GetExtent(
         co_return s;
     }
 
-    TmpBuffer resp_buf;
+    Buffer resp_buf;
     auto st2 = co_await ReadFrame(client_stream, shard);
     if (!st2) {
         s.Set(st2.Code(), st2.Reason());
@@ -98,7 +88,7 @@ static seastar::future<Status<std::unique_ptr<GetExtentResp>>> GetExtent(
 
     std::unique_ptr<GetExtentResp> resp(new GetExtentResp);
     ExtentnodeMsgType type;
-    if (!ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type)) {
+    if (!ParseResponse(resp_buf.share(), resp.get(), type)) {
         s.Set(EINVAL);
         co_return s;
     }
@@ -133,7 +123,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
     {
         uint64_t off = 0;
         size_t body_len = 1 << 20;
-        TmpBuffer content(16 << 20);
+        Buffer content(16 << 20);
         memset(content.get_write(), 'a', content.size());
 
         auto pair_streams = MemStream::make_stream_pair();
@@ -143,15 +133,15 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
         for (int i = 0; i < 16; ++i, off += body_len) {
             std::unique_ptr<WriteExtentReq> req =
                 std::make_unique<WriteExtentReq>();
-            req->mutable_base()->set_reqid("123456");
+            req->mutable_header()->set_reqid("123456");
             req->set_diskid(1);
             req->set_extent_id(std::string(str_extent_id, 16));
             req->set_off(off);
             req->set_len(body_len);
 
-            TmpBuffer body =
+            Buffer body =
                 content.share(off, std::min(body_len, content.size() - off));
-            std::vector<TmpBuffer> packets;
+            std::vector<Buffer> packets;
             size_t packets_len = 0;
             bool first_block = true;
             size_t first_block_len = kBlockDataSize - off % kBlockDataSize;
@@ -169,7 +159,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
                 }
                 uint32_t crc = crc32_gzip_refl(
                     0, (const unsigned char*)(body.get() + pos), n);
-                TmpBuffer crc_buf(4);
+                Buffer crc_buf(4);
                 net::BigEndian::PutUint32(crc_buf.get_write(), crc);
                 packets.emplace_back(std::move(body.share(pos, n)));
                 packets.emplace_back(std::move(crc_buf));
@@ -188,11 +178,10 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
             BOOST_REQUIRE(s);
             auto st = client_stream->ReadFrame().get0();
             BOOST_REQUIRE(st);
-            TmpBuffer resp_buf = std::move(st.Value());
+            Buffer resp_buf = std::move(st.Value());
             std::unique_ptr<CommonResp> resp(new CommonResp());
             ExtentnodeMsgType type;
-            BOOST_REQUIRE(ParseResponse(resp_buf.get(), resp_buf.size(),
-                                        resp.get(), type));
+            BOOST_REQUIRE(ParseResponse(resp_buf.share(), resp.get(), type));
             BOOST_REQUIRE_EQUAL(resp->code(), static_cast<int>(ErrCode::OK));
             BOOST_REQUIRE_EQUAL(extent_ptr->len, body_len * (i + 1));
         }
@@ -208,7 +197,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
         net::StreamPtr read_server_stream = read_streams.second;
         // read data by service interface
         std::unique_ptr<ReadExtentReq> read_req(new ReadExtentReq);
-        read_req->mutable_base()->set_reqid("1234567");
+        read_req->mutable_header()->set_reqid("1234567");
         read_req->set_diskid(1);
         read_req->set_extent_id(std::string(str_extent_id, 16));
         read_req->set_off(offs[i]);
@@ -221,13 +210,12 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
 
         auto st2 = read_client_stream->ReadFrame().get0();
         BOOST_REQUIRE(st2);
-        TmpBuffer read_buf = std::move(st2.Value());
+        Buffer read_buf = std::move(st2.Value());
         std::unique_ptr<ReadExtentResp> read_resp(new ReadExtentResp);
         ExtentnodeMsgType type;
-        BOOST_REQUIRE(ParseResponse(read_buf.get(), read_buf.size(),
-                                    read_resp.get(), type));
+        BOOST_REQUIRE(ParseResponse(read_buf.share(), read_resp.get(), type));
         BOOST_REQUIRE(type == ExtentnodeMsgType::READ_EXTENT_RESP);
-        BOOST_REQUIRE(read_resp->base().code() ==
+        BOOST_REQUIRE(read_resp->header().code() ==
                       static_cast<int>(ErrCode::OK));
         BOOST_REQUIRE(read_resp->len() == lens[i]);
         // read data
@@ -240,7 +228,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
                 break;
             }
             BOOST_REQUIRE(st3);
-            TmpBuffer b = std::move(st3.Value());
+            Buffer b = std::move(st3.Value());
             size_t data_len = b.size();
             const char* p = b.get();
             while (p < b.end()) {
@@ -306,21 +294,21 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
         seastar::foreign_ptr<net::StreamPtr> server_stream =
             std::move(std::get<1>(tp));
 
-        TmpBuffer content(16 << 20);
+        Buffer content(16 << 20);
         memset(content.get_write(), 'a', content.size());
         // write 16M data
         for (int i = 0; i < 16; ++i, off += body_len) {
             std::unique_ptr<WriteExtentReq> req =
                 std::make_unique<WriteExtentReq>();
-            req->mutable_base()->set_reqid("123456");
+            req->mutable_header()->set_reqid("123456");
             req->set_diskid(1);
             req->set_extent_id(std::string(str_extent_id, 16));
             req->set_off(off);
             req->set_len(body_len);
 
-            TmpBuffer body =
+            Buffer body =
                 content.share(off, std::min(body_len, content.size() - off));
-            std::vector<TmpBuffer> packets;
+            std::vector<Buffer> packets;
             std::vector<iovec> iov;
             size_t packets_len = 0;
             bool first_block = true;
@@ -344,7 +332,7 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
                 }
                 uint32_t crc = crc32_gzip_refl(
                     0, (const unsigned char*)(body.get() + pos), n);
-                TmpBuffer crc_buf(4);
+                Buffer crc_buf(4);
                 net::BigEndian::PutUint32(crc_buf.get_write(), crc);
                 iov.push_back({body.get_write() + pos, n});
                 iov.push_back({crc_buf.get_write(), crc_buf.size()});
@@ -367,11 +355,10 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
             BOOST_REQUIRE(s);
             auto st = ReadFrame(client_stream.get(), 1).get0();
             BOOST_REQUIRE(st);
-            TmpBuffer resp_buf = std::move(st.Value());
+            Buffer resp_buf = std::move(st.Value());
             std::unique_ptr<CommonResp> resp(new CommonResp());
             ExtentnodeMsgType type;
-            BOOST_REQUIRE(ParseResponse(resp_buf.get(), resp_buf.size(),
-                                        resp.get(), type));
+            BOOST_REQUIRE(ParseResponse(resp_buf.share(), resp.get(), type));
             BOOST_REQUIRE_EQUAL(resp->code(), static_cast<int>(ErrCode::OK));
             BOOST_REQUIRE_EQUAL(extent_ptr->len, body_len * (i + 1));
         }
@@ -402,7 +389,7 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
             std::move(std::get<1>(tp));
         // read data by service interface
         std::unique_ptr<ReadExtentReq> read_req(new ReadExtentReq);
-        read_req->mutable_base()->set_reqid("1234567");
+        read_req->mutable_header()->set_reqid("1234567");
         read_req->set_diskid(1);
         read_req->set_extent_id(std::string(str_extent_id, 16));
         read_req->set_off(offs[i]);
@@ -424,13 +411,12 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
 
         auto st2 = ReadFrame(read_client_stream.get(), 1).get0();
         BOOST_REQUIRE(st2.OK());
-        TmpBuffer read_buf = std::move(st2.Value());
+        Buffer read_buf = std::move(st2.Value());
         std::unique_ptr<ReadExtentResp> read_resp(new ReadExtentResp);
         ExtentnodeMsgType type;
-        BOOST_REQUIRE(ParseResponse(read_buf.get(), read_buf.size(),
-                                    read_resp.get(), type));
+        BOOST_REQUIRE(ParseResponse(read_buf.share(), read_resp.get(), type));
         BOOST_REQUIRE(type == ExtentnodeMsgType::READ_EXTENT_RESP);
-        BOOST_REQUIRE(read_resp->base().code() ==
+        BOOST_REQUIRE(read_resp->header().code() ==
                       static_cast<int>(ErrCode::OK));
         BOOST_REQUIRE(read_resp->len() == lens[i]);
         // read data
@@ -443,7 +429,7 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
                 break;
             }
             BOOST_REQUIRE(st3.OK());
-            TmpBuffer b = std::move(st3.Value());
+            Buffer b = std::move(st3.Value());
             size_t data_len = b.size();
             const char* p = b.get();
             while (p < b.end()) {
@@ -487,7 +473,7 @@ SEASTAR_THREAD_TEST_CASE(handle_create_test) {
     net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
 
     std::unique_ptr<CreateExtentReq> req(new CreateExtentReq);
-    req->mutable_base()->set_reqid("123456");
+    req->mutable_header()->set_reqid("123456");
     req->set_diskid(1);
     req->set_extent_id(std::string(str_extent_id, 16));
 
@@ -499,11 +485,10 @@ SEASTAR_THREAD_TEST_CASE(handle_create_test) {
     auto st = client_stream->ReadFrame().get();
     BOOST_REQUIRE(st);
 
-    TmpBuffer resp_buf = std::move(st.Value());
+    Buffer resp_buf = std::move(st.Value());
     std::unique_ptr<CommonResp> resp(new CommonResp);
     ExtentnodeMsgType type;
-    BOOST_REQUIRE(
-        ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type));
+    BOOST_REQUIRE(ParseResponse(resp_buf.share(), resp.get(), type));
     BOOST_REQUIRE(type == ExtentnodeMsgType::CREATE_EXTENT_RESP);
     BOOST_REQUIRE(resp->code() == static_cast<int>(ErrCode::OK));
     service.Close().get();
@@ -531,7 +516,7 @@ SEASTAR_THREAD_TEST_CASE(handle_delete_extent_test) {
         net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
 
         std::unique_ptr<CreateExtentReq> req(new CreateExtentReq);
-        req->mutable_base()->set_reqid("123456");
+        req->mutable_header()->set_reqid("123456");
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
@@ -543,11 +528,10 @@ SEASTAR_THREAD_TEST_CASE(handle_delete_extent_test) {
         auto st = client_stream->ReadFrame().get();
         BOOST_REQUIRE(st);
 
-        TmpBuffer resp_buf = std::move(st.Value());
+        Buffer resp_buf = std::move(st.Value());
         std::unique_ptr<CommonResp> resp(new CommonResp);
         ExtentnodeMsgType type;
-        BOOST_REQUIRE(
-            ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type));
+        BOOST_REQUIRE(ParseResponse(resp_buf.share(), resp.get(), type));
         BOOST_REQUIRE(type == ExtentnodeMsgType::CREATE_EXTENT_RESP);
         BOOST_REQUIRE(resp->code() == static_cast<int>(ErrCode::OK));
     }
@@ -559,7 +543,7 @@ SEASTAR_THREAD_TEST_CASE(handle_delete_extent_test) {
         net::BigEndian::PutUint64(&str_extent_id[0], extent_id.hi);
         net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
         std::unique_ptr<DeleteExtentReq> req(new DeleteExtentReq);
-        req->mutable_base()->set_reqid("123456");
+        req->mutable_header()->set_reqid("123456");
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
@@ -571,11 +555,10 @@ SEASTAR_THREAD_TEST_CASE(handle_delete_extent_test) {
         auto st = client_stream->ReadFrame().get();
         BOOST_REQUIRE(st);
 
-        TmpBuffer resp_buf = std::move(st.Value());
+        Buffer resp_buf = std::move(st.Value());
         std::unique_ptr<CommonResp> resp(new CommonResp);
         ExtentnodeMsgType type;
-        BOOST_REQUIRE(
-            ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type));
+        BOOST_REQUIRE(ParseResponse(resp_buf.share(), resp.get(), type));
         BOOST_REQUIRE(type == ExtentnodeMsgType::DELETE_EXTENT_RESP);
         BOOST_REQUIRE(resp->code() == static_cast<int>(ErrCode::OK));
 
@@ -608,7 +591,7 @@ SEASTAR_THREAD_TEST_CASE(handle_get_extent_test) {
         net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
 
         std::unique_ptr<CreateExtentReq> req(new CreateExtentReq);
-        req->mutable_base()->set_reqid("123456");
+        req->mutable_header()->set_reqid("123456");
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
@@ -620,11 +603,10 @@ SEASTAR_THREAD_TEST_CASE(handle_get_extent_test) {
         auto st = client_stream->ReadFrame().get();
         BOOST_REQUIRE(st);
 
-        TmpBuffer resp_buf = std::move(st.Value());
+        Buffer resp_buf = std::move(st.Value());
         std::unique_ptr<CommonResp> resp(new CommonResp);
         ExtentnodeMsgType type;
-        BOOST_REQUIRE(
-            ParseResponse(resp_buf.get(), resp_buf.size(), resp.get(), type));
+        BOOST_REQUIRE(ParseResponse(resp_buf.share(), resp.get(), type));
         BOOST_REQUIRE(type == ExtentnodeMsgType::CREATE_EXTENT_RESP);
         BOOST_REQUIRE(resp->code() == static_cast<int>(ErrCode::OK));
     }
@@ -642,7 +624,7 @@ SEASTAR_THREAD_TEST_CASE(handle_get_extent_test) {
         net::BigEndian::PutUint64(&str_extent_id[8], extent_id.lo);
 
         std::unique_ptr<GetExtentReq> req(new GetExtentReq);
-        req->mutable_base()->set_reqid("123456");
+        req->mutable_header()->set_reqid("123456");
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
@@ -651,7 +633,7 @@ SEASTAR_THREAD_TEST_CASE(handle_get_extent_test) {
                       .get0();
         BOOST_REQUIRE(st);
 
-        BOOST_REQUIRE(st.Value()->base().code() ==
+        BOOST_REQUIRE(st.Value()->header().code() ==
                       static_cast<int>(ErrCode::OK));
         BOOST_REQUIRE(st.Value()->len() == 0);
     }

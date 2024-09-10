@@ -1,12 +1,14 @@
 #include "raft_storage.h"
 
+#include "util/logger.h"
+
 namespace snail {
 namespace stream {
 
 static constexpr size_t kDefaultSnapshotNum = 10;
 
 RaftStorage::RaftStorage(const raft::ConfState& cs, uint64_t applied,
-                         std::unique_ptr<RaftWal> wal, raft::Statemachine* sm)
+                         std::unique_ptr<RaftWal> wal, Statemachine* sm)
     : cs_(cs),
       applied_(applied),
       wal_(std::move(wal)),
@@ -18,7 +20,8 @@ RaftStorage::InitialState() {
     Status<std::tuple<raft::HardState, raft::ConfState>> s;
     auto hs = wal_->GetHardState();
     auto cs = cs_;
-    s.Set(std::make_tuple<raft::HardState, raft::ConfState>(hs, cs));
+    s.SetValue(std::make_tuple<raft::HardState, raft::ConfState>(
+        std::move(hs), std::move(cs)));
     co_return s;
 }
 
@@ -60,9 +63,9 @@ seastar::future<Status<raft::SnapshotPtr>> RaftStorage::Snapshot() {
     raft::ConfState cs = cs_;
 
     for (auto it : raft_node_map_) {
-        raft::RaftNodePtr ptr = it.second;
+        RaftNodePtr ptr = it.second;
         auto raft_node = payload.add_nodes();
-        raft_node->set_node_id(ptr->node_id());
+        raft_node->set_id(ptr->id());
         raft_node->set_raft_host(ptr->raft_host());
         raft_node->set_raft_port(ptr->raft_port());
         raft_node->set_host(ptr->host());
@@ -75,7 +78,7 @@ seastar::future<Status<raft::SnapshotPtr>> RaftStorage::Snapshot() {
         s.Set(st.Code(), st.Reason());
         co_return s;
     }
-    raft::SmSnapshotPtr sm_snap = st.Value();
+    SmSnapshotPtr sm_snap = st.Value();
     auto index = sm_snap->Index();
     auto st1 = co_await Term(index);
     if (!st1) {
@@ -104,7 +107,7 @@ seastar::future<Status<raft::SnapshotPtr>> RaftStorage::Snapshot() {
     co_return s;
 }
 
-raft::SmSnapshotPtr RaftStorage::GetSnapshot(const seastar::sstring& name) {
+SmSnapshotPtr RaftStorage::GetSnapshot(const seastar::sstring& name) {
     auto val = snapshot_cache_.Get(name);
     if (val) {
         return *val;
@@ -117,7 +120,7 @@ void RaftStorage::ReleaseSnapshot(const seastar::sstring& name) {
 }
 
 void RaftStorage::AddRaftNode(RaftNodePtr raft_node) {
-    raft_node_map_[raft_node->node_id()] = raft_node;
+    raft_node_map_[raft_node->id()] = raft_node;
 }
 
 void RaftStorage::RemoveRaftNode(uint64_t node_id) {
@@ -129,7 +132,7 @@ void RaftStorage::UpdateRaftNodes(const std::vector<RaftNode>& nodes) {
     for (int i = 0; i < nodes.size(); ++i) {
         RaftNode node = nodes[i];
         RaftNodePtr node_ptr = seastar::make_lw_shared(std::move(node));
-        node_map[node_ptr->node_id()] = node_ptr;
+        node_map[node_ptr->id()] = node_ptr;
     }
     raft_node_map_ = std::move(node_map);
 }

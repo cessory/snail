@@ -1,4 +1,9 @@
 #pragma once
+#include "proto/master.pb.h"
+#include "raft/storage.h"
+#include "raft_statemachine.h"
+#include "util/lru_cache.h"
+#include "wal/wal.h"
 
 namespace snail {
 namespace stream {
@@ -9,13 +14,13 @@ class RaftStorage : public raft::Storage {
     raft::ConfState cs_;
     uint64_t applied_;
     std::unique_ptr<RaftWal> wal_;
-    raft::Statemachine* sm_;
+    Statemachine* sm_;
     std::unordered_map<uint64_t, RaftNodePtr> raft_node_map_;
-    LRUCache<seastar::sstring, raft::SmSnapshotPtr> snapshot_cache_;
+    LRUCache<seastar::sstring, SmSnapshotPtr> snapshot_cache_;
 
    public:
     explicit RaftStorage(const raft::ConfState& cs, uint64_t applied,
-                         std::unique_ptr<RaftWal> wal, raft::Statemachine* sm);
+                         std::unique_ptr<RaftWal> wal, Statemachine* sm);
 
     seastar::future<Status<std::tuple<raft::HardState, raft::ConfState>>>
     InitialState() override;
@@ -40,7 +45,7 @@ class RaftStorage : public raft::Storage {
 
     void SetConfState(const raft::ConfState& cs) { cs_ = cs; }
 
-    raft::SmSnapshotPtr GetSnapshot(const seastar::sstring& name);
+    SmSnapshotPtr GetSnapshot(const seastar::sstring& name);
 
     void ReleaseSnapshot(const seastar::sstring& name);
 

@@ -8,6 +8,7 @@
 #include "net/tcp_session.h"
 #include "proto/extentnode.pb.h"
 #include "store.h"
+#include "util/util.h"
 
 namespace snail {
 namespace stream {
@@ -56,7 +57,7 @@ namespace stream {
 
 class Service {
     StorePtr store_;
-    LRUCache<BlockCacheKey, TmpBuffer> block_cache_;
+    LRUCache<BlockCacheKey, Buffer> block_cache_;
     seastar::gate gate_;
 
    public:

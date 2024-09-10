@@ -10,6 +10,7 @@
 
 #include "net/byteorder.h"
 #include "util/logger.h"
+#include "util/util.h"
 
 namespace snail {
 namespace stream {
@@ -32,8 +33,8 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
 
     uint64_t off = 0;
     std::vector<iovec> iov;
-    std::vector<TmpBuffer> buf_vec;
-    TmpBuffer buf =
+    std::vector<Buffer> buf_vec;
+    Buffer buf =
         seastar::temporary_buffer<char>::aligned(kMemoryAlignment, 4096);
     uint32_t crc = crc32_gzip_refl(
         0, reinterpret_cast<const unsigned char *>(buf.get()), 496);
@@ -92,7 +93,7 @@ SEASTAR_THREAD_TEST_CASE(sample_test) {
             LOG_ERROR("read block off={} error: {}", off, st.String());
         }
         BOOST_REQUIRE(st.OK());
-        std::vector<TmpBuffer> res = std::move(st.Value());
+        std::vector<Buffer> res = std::move(st.Value());
         BOOST_REQUIRE_EQUAL(res.size(), 1);
         uint32_t crc = crc32_gzip_refl(
             0, reinterpret_cast<const unsigned char *>(res[0].get()), n);
@@ -168,8 +169,8 @@ SEASTAR_THREAD_TEST_CASE(small_write_test) {
     for (int i = 0; i < n; i++) {
         uint64_t len = extent_ptr->len;
         uint64_t free = kBlockDataSize - len % kBlockDataSize;
-        TmpBuffer b = seastar::temporary_buffer<char>::aligned(4096, 4096);
-        std::vector<TmpBuffer> buffers;
+        Buffer b = seastar::temporary_buffer<char>::aligned(4096, 4096);
+        std::vector<Buffer> buffers;
         std::vector<iovec> iov;
         if (free < 200) {
             char *p = b.get_write();
@@ -179,8 +180,7 @@ SEASTAR_THREAD_TEST_CASE(small_write_test) {
             iov.push_back({p, free + 4});
             p += free + 4;
 
-            TmpBuffer buf =
-                seastar::temporary_buffer<char>::aligned(4096, 4096);
+            Buffer buf = seastar::temporary_buffer<char>::aligned(4096, 4096);
             memcpy(buf.get_write(), p, 200 - free);
             crc = crc32_gzip_refl(0, reinterpret_cast<const unsigned char *>(p),
                                   200 - free);
@@ -198,7 +198,7 @@ SEASTAR_THREAD_TEST_CASE(small_write_test) {
                 iov.push_back({p, sector_free + 4});
                 p += sector_free + 4;
 
-                TmpBuffer buf =
+                Buffer buf =
                     seastar::temporary_buffer<char>::aligned(4096, 4096);
                 memcpy(buf.get_write(), p, 200 - sector_free);
                 crc = crc32_gzip_refl(
@@ -247,8 +247,7 @@ SEASTAR_THREAD_TEST_CASE(large_write_test) {
     uint64_t offset = 0;
 
     for (int i = 0; i < n; i++) {
-        TmpBuffer buf =
-            seastar::temporary_buffer<char>::aligned(4096, kBlockSize);
+        Buffer buf = seastar::temporary_buffer<char>::aligned(4096, kBlockSize);
         uint32_t crc = crc32_gzip_refl(
             0, reinterpret_cast<const unsigned char *>(buf.get()),
             kBlockDataSize);

@@ -1,5 +1,10 @@
 #include "wal.h"
 
+#include "net/byteorder.h"
+#include "util/logger.h"
+#include "util/status.h"
+#include "util/util.h"
+
 namespace snail {
 namespace stream {
 
@@ -33,7 +38,7 @@ RaftWal::RaftWal(RaftWalFactory* factory, uint64_t group)
 seastar::future<Status<>> RaftWal::LoadHardState() {
     Status<> s;
 
-    auto st = co_await factory_->worker_thread_.Submit(
+    auto st = co_await factory_->worker_thread_.Submit<Status<std::string>>(
         [this, db = factory_->db_]() -> Status<std::string> {
             Status<std::string> s;
             rocksdb::ReadOptions ro;
@@ -42,7 +47,7 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
             s.SetValue(std::move(value));
@@ -58,7 +63,7 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
         co_return s;
     }
 
-    Buffer tmp(st.Value().get(), st.Value().size(), seastar::deleter());
+    Buffer tmp(st.Value().data(), st.Value().size(), seastar::deleter());
     if (!hs_.Unmarshal(std::move(tmp))) {
         LOG_ERROR("invalid hard state");
         s.Set(EINVAL);
@@ -68,7 +73,7 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
 
 seastar::future<Status<>> RaftWal::LoadSnapshot() {
     Status<> s;
-    auto st = co_await factory_->worker_thread_.Submit(
+    auto st = co_await factory_->worker_thread_.Submit<Status<std::string>>(
         [this, db = factory_->db_]() -> Status<std::string> {
             Status<std::string> s;
             rocksdb::ReadOptions ro;
@@ -78,7 +83,7 @@ seastar::future<Status<>> RaftWal::LoadSnapshot() {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
 
@@ -110,7 +115,7 @@ seastar::future<Status<>> RaftWal::LoadSnapshot() {
 seastar::future<Status<>> RaftWal::LoadLastIndex() {
     Status<> s;
 
-    auto st = co_await factory_->worker_thread_.Submit(
+    auto st = co_await factory_->worker_thread_.Submit<Status<std::string>>(
         [this, db = factory_->db_]() -> Status<std::string> {
             Status<std::string> s;
 
@@ -120,15 +125,15 @@ seastar::future<Status<>> RaftWal::LoadLastIndex() {
                 genLogEntryKey(group_, std::numeric_limits<uint64_t>::max());
             rocksdb::Slice lower_bound(lower_key.get(), lower_key.size());
             rocksdb::Slice upper_bound(upper_key.get(), upper_key.size());
-            ro.iterate_lower_bound = &lower_key;
-            ro.iterate_upper_bound = &upper_key;
+            ro.iterate_lower_bound = &lower_bound;
+            ro.iterate_upper_bound = &upper_bound;
 
             std::unique_ptr<rocksdb::Iterator> iter(db->NewIterator(ro));
             iter->SeekToLast();
             auto st = iter->status();
             if (!st.ok()) {
                 LOG_ERROR("get last index from wal error: {}", st.ToString());
-                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
             std::string last_index = iter->key().ToString();
@@ -187,10 +192,10 @@ seastar::future<Status<>> RaftWal::Load() {
     co_return s;
 }
 
-HardState RaftWal::GetHardState() { return hs_; }
+raft::HardState RaftWal::GetHardState() { return hs_; }
 
-seastar::future<Status<>> RaftWal::Save(std::vector<EntryPtr> entries,
-                                        HardState hs, bool sync) {
+seastar::future<Status<>> RaftWal::Save(std::vector<raft::EntryPtr> entries,
+                                        raft::HardState hs, bool sync) {
     Status<> s;
 
     std::vector<Buffer> buffers;
@@ -247,7 +252,7 @@ seastar::future<Status<>> RaftWal::Save(std::vector<EntryPtr> entries,
     if (buffers.empty()) {
         co_return s;
     }
-    s = co_await factory_->worker_thread_.Submit(
+    s = co_await factory_->worker_thread_.Submit<Status<>>(
         [this, db = factory_->db_, sync, &batch]() -> Status<> {
             Status<> s;
             rocksdb::WriteOptions wo;
@@ -255,7 +260,7 @@ seastar::future<Status<>> RaftWal::Save(std::vector<EntryPtr> entries,
 
             auto st = db->Write(wo, &batch);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
             }
             return s;
         });
@@ -295,7 +300,8 @@ seastar::future<Status<std::vector<raft::EntryPtr>>> RaftWal::Entries(
         co_return s;
     }
 
-    s = co_await factory_->worker_thread_.Submit(
+    s = co_await factory_->worker_thread_.Submit<
+        Status<std::vector<raft::EntryPtr>>>(
         [this, db = factory_->db_, lo, hi,
          max_size]() -> Status<std::vector<raft::EntryPtr>> {
             Status<std::vector<raft::EntryPtr>> s;
@@ -306,24 +312,24 @@ seastar::future<Status<std::vector<raft::EntryPtr>>> RaftWal::Entries(
             auto upper_key = genLogEntryKey(group_, hi);
             rocksdb::Slice lower_bound(lower_key.get(), lower_key.size());
             rocksdb::Slice upper_bound(upper_key.get(), upper_key.size());
-            ro.iterate_lower_bound = &lower_key;
-            ro.iterate_upper_bound = &upper_key;
+            ro.iterate_lower_bound = &lower_bound;
+            ro.iterate_upper_bound = &upper_bound;
 
             std::unique_ptr<rocksdb::Iterator> iter(db->NewIterator(ro));
             iter->SeekToFirst();
             auto st = iter->status();
             if (!st.ok()) {
                 LOG_ERROR("get entries from wal error: {}", st.ToString());
-                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
             size_t n = 0;
             for (; iter->Valid(); iter->Next()) {
                 raft::EntryPtr ent = raft::make_entry();
                 auto v = iter->value();
-                Buffer b(v.data(), v.size(), seastar::deleter());
+                Buffer b(v.data(), v.size());
                 ent->Unmarshal(std::move(b));
-                if (ent.data().size() + n > max_size && !ents.empty()) {
+                if (ent->data().size() + n > max_size && !ents.empty()) {
                     break;
                 }
                 ents.push_back(ent);
@@ -351,7 +357,7 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
         co_return s;
     }
 
-    auto st = co_await factory_->worker_thread_.Submit(
+    auto st = co_await factory_->worker_thread_.Submit<Status<std::string>>(
         [this, db = factory_->db_, index]() -> Status<std::string> {
             Status<std::string> s;
             rocksdb::ReadOptions ro;
@@ -361,7 +367,7 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnexpect, st.ToString());
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
 
@@ -380,14 +386,15 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
         co_return s;
     }
 
-    Entry entry;
+    raft::Entry entry;
     if (!entry.Unmarshal(
             Buffer(st.Value().data(), st.Value().size(), seastar::deleter()))) {
         LOG_ERROR("unmarshal log entry error, group={}", group_);
-        s.Set(ErrCode::ErrUnexpect, "unmarshal log entry error");
+        s.Set(ErrCode::ErrUnExpect, "unmarshal log entry error");
         co_return s;
     }
-    co_return entry.term();
+    s.SetValue(entry.term());
+    co_return s;
 }
 
 seastar::future<Status<>> RaftWal::Release(uint64_t index) {
@@ -403,8 +410,9 @@ seastar::future<Status<>> RaftWal::Release(uint64_t index) {
         s.Set(st.Code(), st.Reason());
         co_return s;
     }
+    uint64_t term = st.Value();
 
-    s = co_await factory_->worker_thread_.Submit(
+    s = co_await factory_->worker_thread_.Submit<Status<>>(
         [this, db = factory_->db_, index, term]() -> Status<> {
             Status<> s;
             rocksdb::WriteOptions wo;
@@ -441,41 +449,42 @@ seastar::future<Status<>> RaftWal::ApplySnapshot(uint64_t index,
                                                  uint64_t term) {
     Status<> s;
 
-    s = co_await factory_->worker_thread_.Submit([this, db = factory_->db_,
-                                                  index, term]() -> Status<> {
-        Status<> s;
-        HardState hs;
-        hs.set_commit(index);
-        hs.set_term(term);
+    s = co_await factory_->worker_thread_.Submit<Status<>>(
+        [this, db = factory_->db_, index, term]() -> Status<> {
+            Status<> s;
+            raft::HardState hs;
+            hs.set_commit(index);
+            hs.set_term(term);
 
-        auto key1 = genHardStateKey(group_);
-        auto key2 = genSnapshotKey(group_);
+            auto key1 = genHardStateKey(group_);
+            auto key2 = genSnapshotKey(group_);
 
-        Buffer val1(hs.ByteSize());
-        Buffer val2(sizeof(RaftWal::Snapshot));
-        hs.MarshalTo(val1.get_write());
-        net::BigEndian::PutUint64(val2.get_write(), index);
-        net::BigEndian::PutUint64(val2.get_write() + 8, term);
+            Buffer val1(hs.ByteSize());
+            Buffer val2(sizeof(RaftWal::Snapshot));
+            hs.MarshalTo(val1.get_write());
+            net::BigEndian::PutUint64(val2.get_write(), index);
+            net::BigEndian::PutUint64(val2.get_write() + 8, term);
 
-        rocksdb::WriteOptions wo;
-        wo.sync = true;
+            rocksdb::WriteOptions wo;
+            wo.sync = true;
 
-        rocksdb::WriteBatch batch;
-        batch.Put(rocksdb::Slice(key1.get(), key1.size()),
-                  rocksdb::Slice(val1.get(), val1.size()));
-        batch.Put(rocksdb::Slice(key2.get(), key2.size()),
-                  rocksdb::Slice(val2.get(), val2.size()));
+            rocksdb::WriteBatch batch;
+            batch.Put(rocksdb::Slice(key1.get(), key1.size()),
+                      rocksdb::Slice(val1.get(), val1.size()));
+            batch.Put(rocksdb::Slice(key2.get(), key2.size()),
+                      rocksdb::Slice(val2.get(), val2.size()));
 
-        auto begin = genLogEntryKey(group_, 0);
-        auto end = genLogEntryKey(group_, std::numeric_limits<uint64_t>::max());
-        batch.DeleteRange(rocksdb::Slice(begin.get(), begin.size()),
-                          rocksdb::Slice(end.get(), end.size()));
-        auto st = db->Write(wo, &batch);
-        if (!st.ok()) {
-            s.Set(ErrCode::ErrUnExpect, st.ToString());
-        }
-        return s;
-    });
+            auto begin = genLogEntryKey(group_, 0);
+            auto end =
+                genLogEntryKey(group_, std::numeric_limits<uint64_t>::max());
+            batch.DeleteRange(rocksdb::Slice(begin.get(), begin.size()),
+                              rocksdb::Slice(end.get(), end.size()));
+            auto st = db->Write(wo, &batch);
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+            }
+            return s;
+        });
     if (!s) {
         LOG_ERROR("apply snapshot error: {}, group={}", s, group_);
         co_return s;
@@ -501,7 +510,7 @@ RaftWalFactory::~RaftWalFactory() {
 
 seastar::future<Status<>> RaftWalFactory::OpenDB() {
     Status<> s;
-    s = co_await worker_thread_.Submit([this] -> Status<> {
+    s = co_await worker_thread_.Submit<Status<>>([this]() -> Status<> {
         Status<> s;
         rocksdb::Options options;
         options.create_if_missing = true;
@@ -510,7 +519,7 @@ seastar::future<Status<>> RaftWalFactory::OpenDB() {
 
         auto st = rocksdb::DB::Open(options, path_, &db_);
         if (!st.ok()) {
-            s.Set(ErrCode::ErrUnexpect, st.ToString());
+            s.Set(ErrCode::ErrUnExpect, st.ToString());
         }
         return s;
     });
@@ -521,8 +530,7 @@ seastar::future<Status<std::unique_ptr<RaftWalFactory>>> RaftWalFactory::Create(
     std::string path) {
     Status<std::unique_ptr<RaftWalFactory>> s;
 
-    std::unique_ptr<RaftWalFactory> factory =
-        std::make_unique<RaftWalFactory>(path);
+    std::unique_ptr<RaftWalFactory> factory(new RaftWalFactory(path));
     auto st = co_await factory->OpenDB();
     if (!st) {
         LOG_ERROR("open wal error: {}", st);
@@ -538,8 +546,7 @@ seastar::future<Status<std::unique_ptr<RaftWal>>> RaftWalFactory::OpenRaftWal(
     uint64_t group) {
     Status<std::unique_ptr<RaftWal>> s;
 
-    std::unique_ptr<RaftWal> raft_wal_ptr =
-        std::make_unique<RaftWal>(this, group);
+    std::unique_ptr<RaftWal> raft_wal_ptr(new RaftWal(this, group));
 
     auto st = co_await raft_wal_ptr->Load();
     if (!st) {

@@ -1,5 +1,18 @@
 #include "raft_transport.h"
 
+#include <isa-l/crc.h>
+
+#include <seastar/core/reactor.hh>
+#include <seastar/core/when_all.hh>
+#include <seastar/coroutine/maybe_yield.hh>
+#include <seastar/util/defer.hh>
+
+#include "net/frame.h"
+#include "net/tcp_connection.h"
+#include "net/tcp_session.h"
+#include "raft/raft_proto.h"
+#include "util/logger.h"
+
 namespace snail {
 namespace stream {
 
@@ -12,44 +25,53 @@ enum class RpcMessageType {
 //|   crc   |  len    |type|
 static constexpr uint32_t kRpcHeaderSize = 9;
 
-class ReceivedSnapshot : public raft::SmSnapshot {
+class ReceivedSnapshot : public SmSnapshot {
     seastar::sstring name_;
     uint64_t index_;
     bool eof_;
     std::queue<Buffer> pending_;
+    seastar::semaphore pending_sem_ = {128};
     seastar::condition_variable cv_;
-    Status<> status_;
+    seastar::gate gate_;
 
    public:
     explicit ReceivedSnapshot(const seastar::sstring& name, uint64_t index)
         : name_(name), index_(index), eof_(false) {}
 
-    void SetStatus(Status<> s) {
-        status_ = s;
-        cv_.signal();
-    }
+    virtual ~ReceivedSnapshot() {}
 
-    Status<> Write(Buffer b) {
+    seastar::future<Status<>> Write(Buffer b) {
         Status<> s;
-        if (!status_) {
-            s = status_;
-            return s;
+        if (gate_.is_closed()) {
+            s.Set(EPIPE);
+            co_return s;
         }
-        pending_.push_back(std::move(b));
-        return s;
+        seastar::gate::holder holder(gate_);
+        try {
+            co_await pending_sem_.wait();
+        } catch (...) {
+            s.Set(EPIPE);
+            co_return s;
+        }
+        pending_.push(std::move(b));
+        cv_.signal();
+        co_return s;
     }
 
-    const seastar::sstring Name() override { return name_; }
+    const seastar::sstring& Name() override { return name_; }
 
     uint64_t Index() const override { return index_; }
 
     seastar::future<Status<Buffer>> Read() override {
         Status<Buffer> s;
-        for (;;) {
-            if (!status_) {
-                s = status_;
-                break;
-            }
+
+        if (gate_.is_closed()) {
+            s.Set(EPIPE);
+            co_return s;
+        }
+        seastar::gate::holder holder(gate_);
+
+        while (!gate_.is_closed()) {
             if (eof_) {
                 break;
             }
@@ -61,16 +83,24 @@ class ReceivedSnapshot : public raft::SmSnapshot {
                     s.SetValue(std::move(b));
                 }
                 pending_.pop();
+                pending_sem_.signal();
                 break;
             }
+            co_await cv_.wait();
+        }
 
-            cv_.wait();
+        if (gate_.is_closed()) {
+            s.Set(EPIPE);
         }
         co_return s;
     };
 
     seastar::future<> Close() override {
-        status_.Set(EPIPE);
+        if (!gate_.is_closed()) {
+            cv_.signal();
+            pending_sem_.broken();
+            co_await gate_.close();
+        }
         co_return;
     }
 };
@@ -82,7 +112,7 @@ RaftSender::Client::Client(uint64_t id, const std::string& raft_host,
 seastar::future<Status<>> RaftSender::Client::Connect() {
     Status<> s;
     co_await sess_mutex.lock();
-    seastar::defer defer([this] { sess_mutex.unlock(); });
+    auto defer = seastar::defer([this] { sess_mutex.unlock(); });
 
     if (sess && sess->Valid()) {
         co_return s;
@@ -91,27 +121,28 @@ seastar::future<Status<>> RaftSender::Client::Connect() {
         co_await sess->Close();
     }
     seastar::timer<seastar::steady_clock_type> timer;
+    seastar::pollable_fd fd;
     try {
         net::Option opt;
         opt.max_frame_size = net::kMaxFrameSize;
         seastar::socket_address sa(seastar::ipv4_addr(host, port));
-        auto fd = seastar::engine().make_pollable_fd(sa, 0);
+        fd = seastar::engine().make_pollable_fd(sa, 0);
         timer.set_callback([&fd] { fd.close(); });
         timer.arm(std::chrono::seconds(opt.write_timeout_s));
         co_await seastar::engine().posix_connect(fd, sa,
                                                  seastar::socket_address());
-        arm.cancel();
-        auto conn = net::TcpConnection::make_connection(std::move(fd), sa);
+        timer.cancel();
+        auto conn = net::TcpConnection::make_connection(fd, sa);
         sess = net::TcpSession::make_session(opt, conn, true);
     } catch (std::system_error& e) {
-        arm.cancel();
+        timer.cancel();
         s.Set(e.code().value(), e.what());
         LOG_ERROR("connect raft node(id={} host={} port={}) error: {}", node_id,
                   host, port, s);
         stream.reset();
         co_return s;
     } catch (std::exception& e) {
-        arm.cancel();
+        timer.cancel();
         s.Set(ErrCode::ErrUnExpect, e.what());
         LOG_ERROR("connect raft node(id={} host={} port={}) error: {}", node_id,
                   host, port, s);
@@ -122,14 +153,19 @@ seastar::future<Status<>> RaftSender::Client::Connect() {
 }
 
 seastar::future<> RaftSender::Client::Send(std::vector<Buffer> buffers) {
+    if (gate.is_closed()) {
+        co_return;
+    }
+
+    seastar::gate::holder holder(gate);
     auto s = co_await Connect();
     if (!s) {
         co_return;
     }
 
-    if (!stream || !stream->Valid()) {
+    if (!stream || !(*stream)->Valid()) {
         if (stream) {
-            co_await stream->Close();
+            co_await(*stream)->Close();
         }
         auto st = co_await sess->OpenStream();
         if (!st) {
@@ -137,13 +173,14 @@ seastar::future<> RaftSender::Client::Send(std::vector<Buffer> buffers) {
         }
         stream = st.Value();
     }
-    uint32_t max_frame_size = stream->MaxFrameSize();
+    uint32_t max_frame_size = (*stream)->MaxFrameSize();
     std::vector<seastar::future<Status<>>> fu_vec;
     for (int i = 0; i < buffers.size(); ++i) {
         uint32_t n = 0;
-        for (const char* p = buffer[i].get(); p < buffer[i].end(); p += n) {
-            n = std::min(buffer[i].end() - p, max_frame_size);
-            auto fu = stream->WriteFrame(p, n);
+        for (const char* p = buffers[i].get(); p < buffers[i].end(); p += n) {
+            n = std::min(buffers[i].end() - p,
+                         static_cast<long int>(max_frame_size));
+            auto fu = (*stream)->WriteFrame(p, n);
             fu_vec.emplace_back(std::move(fu));
         }
     }
@@ -155,7 +192,7 @@ seastar::future<> RaftSender::Client::Send(std::vector<Buffer> buffers) {
                 "send raft message to raft node(id={} host={} port={}) error: "
                 "{}",
                 node_id, host, port, results[i]);
-            co_await stream->Close();
+            co_await stream.value()->Close();
             break;
         }
     }
@@ -165,13 +202,18 @@ seastar::future<> RaftSender::Client::Send(std::vector<Buffer> buffers) {
 seastar::future<Status<>> RaftSender::Client::SendSnapshot(raft::MessagePtr msg,
                                                            SmSnapshotPtr body) {
     Status<> s;
+    if (gate.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate);
     net::StreamPtr stream_ptr;
     s = co_await Connect();
     if (!s) {
         co_return s;
     }
 
-    auto st = co_await sess_ptr->OpenStream();
+    auto st = co_await sess->OpenStream();
     if (!st) {
         LOG_ERROR("open stream error: {}", st);
         s.Set(st.Code(), st.Reason());
@@ -183,7 +225,8 @@ seastar::future<Status<>> RaftSender::Client::SendSnapshot(raft::MessagePtr msg,
     Buffer b(n + kRpcHeaderSize);
     msg->MarshalTo(b.get_write() + kRpcHeaderSize);
     net::BigEndian::PutUint32(b.get_write() + 4, n);
-    *(b.get_write() + kRpcHeaderSize - 1) = RpcMessageType::Snapshot;
+    *(b.get_write() + kRpcHeaderSize - 1) =
+        static_cast<char>(RpcMessageType::Snapshot);
     uint32_t crc =
         crc32_gzip_refl(0, (const uint8_t*)(b.get() + 4), b.size() - 4);
     net::BigEndian::PutUint32(b.get_write(), crc);
@@ -192,7 +235,7 @@ seastar::future<Status<>> RaftSender::Client::SendSnapshot(raft::MessagePtr msg,
     fu = stream_ptr->WriteFrame(std::move(b));
 
     std::vector<Buffer> buffers;
-    for (;;) {
+    while (!gate.is_closed()) {
         auto st = co_await body->Read();
         if (!st) {
             LOG_ERROR("read raft snapshot {} error: {}", body->Name(), st);
@@ -206,7 +249,8 @@ seastar::future<Status<>> RaftSender::Client::SendSnapshot(raft::MessagePtr msg,
 
         Buffer head(kRpcHeaderSize);
         net::BigEndian::PutUint32(head.get_write() + 4, b.size());
-        *(head.get_write() + kRpcHeaderSize - 1) = RpcMessageType::Snapshot;
+        *(head.get_write() + kRpcHeaderSize - 1) =
+            static_cast<char>(RpcMessageType::Snapshot);
         uint32_t crc = crc32_gzip_refl(0, (const uint8_t*)(head.get() + 4),
                                        kRpcHeaderSize - 4);
         crc = crc32_gzip_refl(crc, (const uint8_t*)(b.get()), b.size());
@@ -238,11 +282,12 @@ seastar::future<Status<>> RaftSender::Client::SendSnapshot(raft::MessagePtr msg,
         }
     }
 
-    if (s) {
+    if (s && !gate.is_closed()) {
         // sending empty data means that the snapshot has ended
         Buffer head(kRpcHeaderSize);
         net::BigEndian::PutUint32(head.get_write() + 4, 0);
-        *(head.get_write() + kRpcHeaderSize - 1) = RpcMessageType::Snapshot;
+        *(head.get_write() + kRpcHeaderSize - 1) =
+            static_cast<char>(RpcMessageType::Snapshot);
         uint32_t crc = crc32_gzip_refl(0, (const uint8_t*)(head.get() + 4),
                                        kRpcHeaderSize - 4);
         net::BigEndian::PutUint32(head.get_write(), crc);
@@ -296,15 +341,18 @@ seastar::future<Status<>> RaftSender::Client::SendSnapshot(raft::MessagePtr msg,
 }
 
 seastar::future<> RaftSender::Client::Close() {
-    if (sess) {
-        co_await sess->Close();
-        sess.reset();
+    if (!gate.is_closed()) {
+        co_await gate.close();
+        if (sess) {
+            co_await sess->Close();
+            sess = nullptr;
+        }
     }
     co_return;
 }
 
-RaftSender::AddRaftNode(uint64_t node_id, const std::string& raft_host,
-                        uint16_t raft_port) {
+void RaftSender::AddRaftNode(uint64_t node_id, const std::string& raft_host,
+                             uint16_t raft_port) {
     if (senders_.count(node_id)) {
         LOG_WARN("raft node(id={}, host={}, port={}) has already exist",
                  node_id, raft_host, raft_port);
@@ -318,10 +366,13 @@ RaftSender::AddRaftNode(uint64_t node_id, const std::string& raft_host,
 }
 
 seastar::future<> RaftSender::RemoveRaftNode(uint64_t node_id) {
-    seastar::holder holder(gate_);
+    if (gate_.is_closed()) {
+        co_return;
+    }
+    seastar::gate::holder holder(gate_);
     auto iter = senders_.find(node_id);
     if (iter == senders_.end()) {
-        return;
+        co_return;
     }
     RaftSender::ClientPtr client = iter->second;
     senders_.erase(iter);
@@ -329,35 +380,42 @@ seastar::future<> RaftSender::RemoveRaftNode(uint64_t node_id) {
 }
 
 seastar::future<> RaftSender::UpdateRaftNodes(std::vector<RaftNode> nodes) {
-    seastar::holder holder(gate_);
+    if (gate_.is_closed()) {
+        co_return;
+    }
+    seastar::gate::holder holder(gate_);
     std::unordered_map<uint64_t, ClientPtr> senders;
     for (int i = 0; i < nodes.size(); ++i) {
-        auto iter = senders_.find(nodes[i].node_id());
+        auto iter = senders_.find(nodes[i].id());
         if (iter == senders_.end()) {
             RaftSender::ClientPtr client =
                 seastar::make_lw_shared<RaftSender::Client>(
-                    nodes[i].node_id, nodes[i].raft_host, nodes[i].raft_port);
-            senders[nodes[i].node_id()] = client;
+                    nodes[i].id(), nodes[i].raft_host(), nodes[i].raft_port());
+            senders[nodes[i].id()] = client;
         } else {
-            senders[nodes[i].node_id()] = iter->second;
+            senders[nodes[i].id()] = iter->second;
         }
     }
     senders_.swap(senders);
+    std::vector<seastar::future<>> fu_vec;
     for (auto it : senders) {
         if (!senders_.count(it.first)) {
-            co_await it.second->Close();
+            auto fu = it.second->Close();
+            fu_vec.emplace_back(std::move(fu));
         }
+    }
+    if (!fu_vec.empty()) {
+        co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
     }
     co_return;
 }
 
-seastar::future<> RaftSender::Send(std::vector<MessagePtr> msgs) {
+seastar::future<> RaftSender::Send(std::vector<raft::MessagePtr> msgs) {
     std::unordered_map<uint64_t, std::vector<Buffer>> node_msgs;
     if (gate_.is_closed()) {
-        s.Set(EPIPE);
-        co_return s;
+        co_return;
     }
-    seastar::holder holder(gate_);
+    seastar::gate::holder holder(gate_);
     for (int i = 0; i < msgs.size(); i++) {
         if (!msgs[i] || msgs[i]->to == 0) {
             continue;
@@ -382,13 +440,13 @@ seastar::future<> RaftSender::Send(std::vector<MessagePtr> msgs) {
         co_await seastar::coroutine::maybe_yield();
     }
 
-    std::vector<seatar::future<>> fu_vec;
+    std::vector<seastar::future<>> fu_vec;
     for (auto& it : node_msgs) {
-        auto iter = sender_.find(it.first);
-        if (iter == sender_.end()) {
+        auto iter = senders_.find(it.first);
+        if (iter == senders_.end()) {
             continue;
         }
-        auto fu = iter->second.Send(std::move(it.second));
+        auto fu = iter->second->Send(std::move(it.second));
         fu_vec.emplace_back(std::move(fu));
     }
     if (fu_vec.size()) {
@@ -408,10 +466,10 @@ seastar::future<Status<>> RaftSender::SendSnapshot(raft::MessagePtr msg,
         s.Set(EPIPE);
         co_return s;
     }
-    seastar::holder holder(gate_);
+    seastar::gate::holder holder(gate_);
 
-    auto iter = sender_.find(msg->to);
-    if (iter == sender_.end()) {
+    auto iter = senders_.find(msg->to);
+    if (iter == senders_.end()) {
         s.Set(EEXIST);
         co_return s;
     }
@@ -435,9 +493,9 @@ seastar::future<> RaftSender::Close() {
 
 RaftReceiver::RaftReceiver(
     const std::string& host, uint16_t port,
-    seastar::nocopyable_function<void(raft::MessagePtr msg)> msg_func,
-    seastar::nocopyable_function<seastar::future<Status<>>(
-        raft::SnapshotPtr meta, raft::SmSnapshotPtr body)>
+    seastar::noncopyable_function<void(raft::MessagePtr msg)> msg_func,
+    seastar::noncopyable_function<
+        seastar::future<Status<>>(raft::SnapshotPtr meta, SmSnapshotPtr body)>
         apply_snapshot_func)
     : host_(host),
       port_(port),
@@ -447,10 +505,10 @@ RaftReceiver::RaftReceiver(
 seastar::future<> RaftReceiver::HandleStream(net::StreamPtr stream) {
     std::optional<RpcMessageType> prev_type;
     raft::MessagePtr snapshot_msg = nullptr;
-    seastar::shared<ReceivedSnapshot> snapshot_body = nullptr;
+    seastar::shared_ptr<ReceivedSnapshot> snapshot_body = nullptr;
     std::optional<seastar::future<Status<>>> apply_snapshot_fu;
 
-    seastar::holder holder(gate_);
+    seastar::gate::holder holder(gate_);
 
     for (;;) {
         auto s = co_await stream->ReadFrame();
@@ -557,7 +615,7 @@ seastar::future<> RaftReceiver::HandleStream(net::StreamPtr stream) {
                     Buffer head(kRpcHeaderSize);
                     net::BigEndian::PutUint32(head.get_write() + 4, b.size());
                     *(head.get_write() + kRpcHeaderSize - 1) =
-                        RpcMessageType::Snapshot;
+                        static_cast<char>(RpcMessageType::Snapshot);
                     uint32_t crc =
                         crc32_gzip_refl(0, (const uint8_t*)(head.get() + 4),
                                         kRpcHeaderSize - 4);
@@ -588,37 +646,41 @@ seastar::future<> RaftReceiver::HandleStream(net::StreamPtr stream) {
                     break;
                 }
                 seastar::sstring name(payload.name().data(),
-                                      payload.name.size());
+                                      payload.name().size());
                 uint64_t index = snapshot_msg->snapshot->metadata().index();
                 snapshot_body =
                     seastar::make_shared<ReceivedSnapshot>(name, index);
                 apply_snapshot_fu = apply_snapshot_func_(
-                    snapshot_meta,
-                    seastar::dynamic_pointer_cast<raft::SmSnapshot,
-                                                  ReceivedSnapshot>(
+                    snapshot_msg->snapshot,
+                    seastar::dynamic_pointer_cast<SmSnapshot, ReceivedSnapshot>(
                         snapshot_body));
             }
         } else {
             raft::MessagePtr msg = raft::make_raft_message();
-            if (!msg->ParseFromArray(b.get(), b.size())) {
+            if (!msg->Unmarshal(b.share())) {
                 break;
             }
             msg_handle_func_(msg);
         }
     }
     co_await stream->Close();
+    if (snapshot_body) {
+        co_await snapshot_body->Close();
+    }
     co_return;
 }
 
 seastar::future<> RaftReceiver::HandleSession(net::SessionPtr sess) {
-    seastar::holder holder(gate_);
-    for (;;) {
-        auto s = co_await sess->AcceptStream();
-        if (!s) {
-            LOG_ERROR("accept stream error: {}", s);
-            break;
+    if (!gate_.is_closed()) {
+        seastar::gate::holder holder(gate_);
+        for (;;) {
+            auto s = co_await sess->AcceptStream();
+            if (!s) {
+                LOG_ERROR("accept stream error: {}", s);
+                break;
+            }
+            (void)HandleStream(s.Value());
         }
-        (void)HandleStream(s.Value());
     }
     co_await sess->Close();
     sess_map_.erase(sess->ID());
@@ -626,7 +688,10 @@ seastar::future<> RaftReceiver::HandleSession(net::SessionPtr sess) {
 }
 
 seastar::future<> RaftReceiver::Start() {
-    seastar::holder holder(gate_);
+    if (gate_.is_closed()) {
+        co_return;
+    }
+    seastar::gate::holder holder(gate_);
     try {
         seastar::socket_address sa(seastar::ipv4_addr(host_, port_));
         listen_fd_ = seastar::engine().posix_listen(sa);
@@ -648,7 +713,7 @@ seastar::future<> RaftReceiver::Start() {
         auto conn = snail::net::TcpConnection::make_connection(
             std::move(std::get<0>(ar)), std::get<1>(ar));
         snail::net::Option opt;
-        opt.max_fram_size = net::kMaxFrameSize;
+        opt.max_frame_size = net::kMaxFrameSize;
         auto sess = snail::net::TcpSession::make_session(opt, conn, false);
         sess_map_[sess->ID()] = sess;
         (void)HandleSession(sess);

@@ -15,6 +15,7 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::ErrTooShort, "data too short"},
     {ErrCode::ErrTooLarge, "data too larger"},
     {ErrCode::ErrInvalidChecksum, "invalid checksum"},
+    {ErrCode::ErrCluster, "invalid cluster id"},
 
     ////////raft error/////////////
     {ErrCode::ErrRaftCompacted,

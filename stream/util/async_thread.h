@@ -83,8 +83,10 @@ class AsyncThread {
             co_return std::move(res);
         }
         auto res = co_await seastar::smp::submit_to(
-            shard_id_, [this, f = std::move(func)]() -> seastar::future<T> {
-                return worker_queue_.Submit(std::move(f));
+            shard_id_,
+            [this, f = std::move(func)]() mutable -> seastar::future<T> {
+                return worker_queue_.Submit(
+                    std::forward<seastar::noncopyable_function<T()>>(f));
             });
         co_return std::move(res);
     }

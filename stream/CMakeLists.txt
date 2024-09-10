@@ -34,6 +34,7 @@ FOREACH(proto_file ${proto_files})
 		DEPENDS ${proto_file}
         )
 ENDFOREACH(proto_file)
+LIST(APPEND proto_srcs "${PROJECT_SOURCE_DIR}/proto/rpc.cc")
 
 include_directories(${PROJECT_SOURCE_DIR})
 add_definitions(-DSPDLOG_FMT_EXTERNAL)
@@ -54,6 +55,7 @@ add_library(RAFT_OBJS OBJECT ${raft_srcs})
 target_link_libraries(RAFT_OBJS Seastar::seastar)
 
 add_subdirectory(extentnode)
+add_subdirectory(master)
 add_subdirectory(demos)
 add_subdirectory(raft)
 

@@ -17,6 +17,7 @@
 #include "types.h"
 #include "util/lru_cache.h"
 #include "util/status.h"
+#include "util/util.h"
 
 namespace snail {
 namespace stream {
@@ -54,7 +55,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     seastar::future<Status<>> AllocChunk(ExtentPtr extent_ptr);
 
     Status<> HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
-                      std::vector<TmpBuffer>& tmp_buf_vec,
+                      std::vector<Buffer>& tmp_buf_vec,
                       std::vector<iovec>& tmp_io_vec,
                       std::string& last_sector_data);
 
@@ -97,16 +98,15 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
                                     std::vector<iovec> iov);
 
     seastar::future<Status<>> Write(ExtentPtr extent_ptr, uint64_t offset,
-                                    std::vector<TmpBuffer> buffers);
+                                    std::vector<Buffer> buffers);
 
     // 读取多个block的数据
     // off - 必须block对齐(32k -4)
     // len   - 数据长度, off+len不能超过extent的数据长度,
     // 需要上层根据extent的实际长度计算好.
     // 如果len大于chunk的大小, 会返回多个数据块
-    seastar::future<Status<std::vector<TmpBuffer>>> Read(ExtentPtr extent_ptr,
-                                                         uint64_t off,
-                                                         size_t len);
+    seastar::future<Status<std::vector<Buffer>>> Read(ExtentPtr extent_ptr,
+                                                      uint64_t off, size_t len);
 
     seastar::future<Status<>> RemoveExtent(ExtentID id);
 

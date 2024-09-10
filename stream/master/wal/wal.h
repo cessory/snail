@@ -15,7 +15,7 @@ class RaftWal {
     };
     RaftWalFactory* factory_;
     uint64_t group_ = 0;
-    HardState hs_;
+    raft::HardState hs_;
     RaftWal::Snapshot snapshot_;
     uint64_t last_index_ = 0;
 
@@ -35,7 +35,7 @@ class RaftWal {
     raft::HardState GetHardState();
 
     seastar::future<Status<>> Save(std::vector<raft::EntryPtr> entries,
-                                   raft::HardState hs);
+                                   raft::HardState hs, bool sync = false);
 
     uint64_t FirstIndex();
 

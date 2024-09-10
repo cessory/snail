@@ -1,4 +1,17 @@
 #pragma once
+#include <queue>
+#include <seastar/core/condition-variable.hh>
+#include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
+#include <seastar/core/internal/pollable_fd.hh>
+#include <seastar/core/shared_mutex.hh>
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/util/noncopyable_function.hh>
+
+#include "net/session.h"
+#include "proto/master.pb.h"
+#include "raft/storage.h"
+#include "raft_statemachine.h"
 
 namespace snail {
 namespace stream {
@@ -11,6 +24,7 @@ class RaftSender {
         seastar::shared_mutex sess_mutex;
         net::SessionPtr sess;
         std::optional<net::StreamPtr> stream;
+        seastar::gate gate;
 
         Client(uint64_t id, const std::string& raft_host, uint16_t raft_port);
         seastar::future<Status<>> Connect();
@@ -45,25 +59,26 @@ class RaftSender {
 class RaftReceiver {
     std::string host_;
     uint16_t port_;
-    seastar::nocopyable_function<void(raft::MessagePtr)> msg_handle_func_;
-    seastar::nocopyable_function<seastar::future<Status<>>(
-        raft::SnapshotPtr meta, raft::SmSnapshotPtr body)>
+    seastar::noncopyable_function<void(raft::MessagePtr)> msg_handle_func_;
+    seastar::noncopyable_function<seastar::future<Status<>>(
+        raft::SnapshotPtr meta, SmSnapshotPtr body)>
         apply_snapshot_func_;
     seastar::pollable_fd listen_fd_;
     std::unordered_map<uint64_t, net::SessionPtr> sess_map_;
     seastar::gate gate_;
 
     seastar::future<> HandleSession(net::SessionPtr sess);
+    seastar::future<> HandleStream(net::StreamPtr stream);
 
    public:
     explicit RaftReceiver(
         const std::string& host, uint16_t port,
-        seastar::nocopyable_function<void(raft::MessagePtr)> msg_func,
-        seastar::nocopyable_function<seastar::future<Status<>>(
-            raft::SnapshotPtr meta, raft::SmSnapshotPtr body)>
+        seastar::noncopyable_function<void(raft::MessagePtr)> msg_func,
+        seastar::noncopyable_function<seastar::future<Status<>>(
+            raft::SnapshotPtr meta, SmSnapshotPtr body)>
             apply_snapshot_func);
 
-    seastar::future<Status<>> Start();
+    seastar::future<> Start();
 
     seastar::future<> Close();
 };

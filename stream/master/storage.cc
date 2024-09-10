@@ -1,0 +1,873 @@
+#include "storage.h"
+
+#include <limits.h>
+
+#include <seastar/core/smp.hh>
+#include <seastar/core/sstring.hh>
+#include <seastar/core/when_all.hh>
+#include <seastar/util/defer.hh>
+
+#include "net/byteorder.h"
+#include "util/logger.h"
+
+namespace snail {
+namespace stream {
+
+struct ApplyEntry {
+    ApplyType type;
+    uint64_t id;
+    Buffer reqid;
+    Buffer ctx;
+    Buffer body;
+
+    Buffer Marshal() {
+        size_t size = 1 + 1 + VarintLength(id);
+        if (reqid.size()) {
+            size += 1 + VarintLength(reqid.size()) + reqid.size();
+        }
+        if (ctx.size()) {
+            size += 1 + VarintLength(ctx.size()) + ctx.size();
+        }
+        if (body.size()) {
+            size += 1 + VarintLength(body.size()) + body.size();
+        }
+
+        Buffer b(size);
+        char* p = b.get_write();
+        *p++ = static_cast<char>(type);
+        p = PutVarint32(p, 1);
+        p = PutVarint64(p, id);
+        if (reqid.size()) {
+            p = PutVarint32(p, 2);
+            p = PutVarint32(p, reqid.size());
+            memcpy(p, reqid.get(), reqid.size());
+            p += reqid.size();
+        }
+        if (ctx.size()) {
+            p = PutVarint32(p, 3);
+            p = PutVarint32(p, ctx.size());
+            memcpy(p, ctx.get(), ctx.size());
+            p += ctx.size();
+        }
+        if (body.size()) {
+            p = PutVarint32(p, 4);
+            p = PutVarint32(p, body.size());
+            memcpy(p, body.get(), body.size());
+            p += body.size();
+        }
+        return b;
+    }
+    bool Unmarshal(Buffer& b) {
+        const char* p = b.get();
+        const char* pend = b.end();
+        size_t n = b.size();
+
+        if (b.empty()) {
+            return false;
+        }
+        type = static_cast<ApplyType>(*p++);
+
+        uint32_t old_tag = 0;
+        while (old_tag < 4 && p < pend) {
+            uint32_t tag = 0;
+            // get tag
+            p = GetVarint32(p, n, &tag);
+            if (p == nullptr) {
+                return false;
+            }
+            n = pend - p;
+            if (tag == 0 || tag > 4 || tag <= old_tag) {
+                return false;
+            }
+            old_tag = tag;
+            uint32_t len = 0;
+            switch (tag) {
+                case 1:
+                    p = GetVarint64(p, n, &id);
+                    if (p == nullptr) {
+                        return false;
+                    }
+                    n = pend - p;
+                    break;
+                case 2:
+                    p = GetVarint32(p, n, &len);
+                    if (p == nullptr) {
+                        return false;
+                    }
+                    n = pend - p;
+                    if (n < len) {
+                        return false;
+                    }
+                    reqid = b.share(p - b.get(), len);
+                    n -= len;
+                    p += len;
+                    break;
+                case 3:
+                    p = GetVarint32(p, n, &len);
+                    if (p == nullptr) {
+                        return false;
+                    }
+                    n = pend - p;
+                    if (n < len) {
+                        return false;
+                    }
+                    ctx = b.share(p - b.get(), len);
+                    n -= len;
+                    p += len;
+                    break;
+                case 4:
+                    p = GetVarint32(p, n, &len);
+                    if (p == nullptr) {
+                        return false;
+                    }
+                    n = pend - p;
+                    if (n < len) {
+                        return false;
+                    }
+                    body = b.share(p - b.get(), len);
+                    n -= len;
+                    p += len;
+                    break;
+            }
+        }
+        return true;
+    }
+};
+
+void WriteBatch::Put(const std::string_view& key,
+                     const std::string_view& value) {
+    batch_.Put(rocksdb::Slice(key.data(), key.size()),
+               rocksdb::Slice(value.data(), value.size()));
+}
+
+void WriteBatch::Delete(const std::string_view& key) {
+    batch_.Delete(rocksdb::Slice(key.data(), key.size()));
+}
+
+void WriteBatch::DeleteRange(const std::string_view& start,
+                             const std::string_view& end) {
+    batch_.DeleteRange(rocksdb::Slice(start.data(), start.size()),
+                       rocksdb::Slice(end.data(), end.size()));
+}
+
+class SmSnapshotImpl : public SmSnapshot {
+    AsyncThread* worker_thread_ = nullptr;
+    rocksdb::DB* db_ = nullptr;
+    const rocksdb::Snapshot* snapshot_ = nullptr;
+    rocksdb::Iterator* iter_ = nullptr;
+    seastar::sstring name_;
+    uint64_t index_;
+    seastar::gate* external_gate_;
+    seastar::gate gate_;
+
+    friend class Storage;
+
+   public:
+    SmSnapshotImpl(const seastar::sstring& name, uint64_t index,
+                   seastar::gate* gate)
+        : name_(name), index_(index), external_gate_(gate) {
+        gate->enter();
+    }
+
+    virtual ~SmSnapshotImpl() { (void)Close(); }
+
+    const seastar::sstring& Name() override { return name_; }
+
+    uint64_t Index() const override { return index_; }
+
+    seastar::future<Status<Buffer>> Read() override {
+        static size_t max_buffer_size = 4 << 20;
+        Status<Buffer> s;
+        if (!db_ || !snapshot_ || !iter_) {
+            s.Set(EINVAL);
+            co_return s;
+        }
+        if (gate_.is_closed()) {
+            s.Set(EPIPE);
+            co_return s;
+        }
+        seastar::gate::holder holder(gate_);
+        Buffer b(max_buffer_size);
+        size_t len = 0;
+        auto st = co_await worker_thread_->Submit<Status<>>(
+            [this, &b, &len]() -> Status<> {
+                Status<> s;
+                char* p = b.get_write() + len;
+                for (; iter_->Valid(); iter_->Next()) {
+                    auto key = iter_->key();
+                    auto value = iter_->value();
+                    uint32_t key_len = VarintLength(key.size());
+                    uint32_t val_len = VarintLength(value.size());
+                    if (len + key.size() + value.size() + key_len + val_len >
+                        max_buffer_size) {
+                        if (len == 0) {
+                            s.Set(EOVERFLOW);
+                            return s;
+                        }
+                        break;
+                    }
+                    p = PutVarint32(p, key_len);
+                    memcpy(p, key.data(), key.size());
+                    p += key.size();
+                    p = PutVarint32(p, val_len);
+                    memcpy(p, value.data(), value.size());
+                    p += value.size();
+                    len = p - b.get();
+                }
+                if (!iter_->status().ok()) {
+                    s.Set(ErrCode::ErrUnExpect, iter_->status().ToString());
+                }
+                return s;
+            });
+        if (!st) {
+            s.Set(st.Code(), st.Reason());
+            co_return s;
+        }
+        if (len > 0) {
+            s.SetValue(std::move(b));
+        }
+        co_return s;
+    }
+
+    seastar::future<> Close() override {
+        if (gate_.is_closed()) {
+            co_return;
+        }
+        auto fu = gate_.close();
+
+        if (iter_) {
+            delete iter_;
+            iter_ = nullptr;
+        }
+
+        if (snapshot_) {
+            co_await worker_thread_->Submit<Status<>>([this]() -> Status<> {
+                Status<> s;
+                db_->ReleaseSnapshot(snapshot_);
+                return s;
+            });
+            snapshot_ = nullptr;
+        }
+        db_ = nullptr;
+        external_gate_->leave();
+        co_return;
+    }
+};
+
+using SmSnapshotImplPtr = seastar::shared_ptr<SmSnapshotImpl>;
+
+Storage::Storage(const std::string& db_path)
+    : db_path_(db_path),
+      applied_(0),
+      snapshot_seq_(time(0)),
+      lead_(0),
+      applied_key_(8, 0) {
+    applied_key_[0] = static_cast<char>(ApplyType::Raft);
+    memcpy(&applied_key_[1], "applied", 7);
+}
+
+seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
+    Status<StoragePtr> s;
+
+    std::string path(db_path);
+    seastar::shared_ptr<Storage> store_ptr =
+        seastar::make_shared<Storage>(std::move(path), std::move(node_id));
+    auto st = co_await store_ptr->worker_thread_.Submit<Status<rocksdb::DB*>>(
+        [db_path]() -> Status<rocksdb::DB*> {
+            Status<rocksdb::DB*> s;
+            rocksdb::DB* db = nullptr;
+            rocksdb::Options opt;
+            opt.create_if_missing = true;
+            opt.max_log_file_size = 1 << 30;
+            opt.keep_log_file_num = 10;
+            std::string path(db_path);
+            auto st = rocksdb::DB::Open(opt, path, &db);
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                return s;
+            }
+            s.SetValue(db);
+            return s;
+        });
+    if (!st) {
+        s.Set(st.Code(), st.Reason());
+        LOG_ERROR("open db {} error: {}", db_path, s);
+        co_return s;
+    }
+    std::unique_ptr<rocksdb::DB> db_ptr(st.Value());
+    store_ptr->db_ = std::move(db_ptr);
+    auto st2 = co_await store_ptr->LoadRaft();
+    if (!st2) {
+        LOG_ERROR("load data from db error: {}", st2);
+        s.Set(st2.Code(), st2.Reason());
+        co_return s;
+    }
+    s.SetValue(store_ptr);
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::LoadRaft() {
+    Status<> s;
+
+    s = co_await worker_thread_.Submit<Status<>>([this]() -> Status<> {
+        Status<> s;
+        rocksdb::ReadOptions ro;
+        char start_key[1];
+        char end_key[1];
+
+        start_key[0] = static_cast<char>(ApplyType::Raft);
+        end_key[0] = static_cast<char>((char)ApplyType::Raft + 1);
+        rocksdb::Slice lower_bound(start_key, 1);
+        rocksdb::Slice upper_bound(end_key, 1);
+
+        ro.fill_cache = false;
+        ro.iterate_lower_bound = &lower_bound;
+        ro.iterate_upper_bound = &upper_bound;
+
+        auto iter = db_->NewIterator(ro);
+        for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+            auto key = iter->key();
+            auto value = iter->value();
+
+            if (0 == key.compare(applied_key_)) {
+                applied_ = net::BigEndian::Uint64(value.data());
+                continue;
+            }
+
+            RaftNode node;
+            node.ParseFromArray(value.data(), value.size());
+            if (node.id() == 0) {
+                continue;
+            }
+
+            raft_nodes_[node.id()] = node;
+        }
+        auto st = iter->status();
+        if (!st.ok()) {
+            s.Set(ErrCode::ErrUnExpect, st.ToString());
+        }
+        delete iter;
+        return s;
+    });
+    if (!s) {
+        LOG_ERROR("load raft config from db error: {}", s);
+    }
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::SaveApplied(uint64_t index, bool sync) {
+    Status<> s;
+
+    Buffer key(applied_key_.data(), applied_key_.size(), seastar::deleter());
+    char value[sizeof(index)];
+    net::BigEndian::PutUint64(value, index);
+    Buffer val(value, sizeof(value), seastar::deleter());
+    s = co_await Put(key.share(), val.share(), sync);
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::Apply(std::vector<Buffer> datas,
+                                         uint64_t index) {
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+    std::vector<seastar::future<Status<>>> fu_vec;
+    for (int i = 0; i < datas.size(); i++) {
+        Buffer b = std::move(datas[i]);
+        ApplyEntry entry;
+        if (!entry.Unmarshal(b)) {
+            s.Set(EINVAL);
+            co_return s;
+        }
+        int type = (int)entry.type;
+        seastar::foreign_ptr<std::unique_ptr<Buffer>> reqid =
+            seastar::make_foreign(
+                std::make_unique<Buffer>(std::move(entry.reqid)));
+        uint64_t id = entry.id;
+        seastar::foreign_ptr<std::unique_ptr<Buffer>> ctx =
+            seastar::make_foreign(
+                std::make_unique<Buffer>(std::move(entry.ctx)));
+        seastar::foreign_ptr<std::unique_ptr<Buffer>> body =
+            seastar::make_foreign(
+                std::make_unique<Buffer>(std::move(entry.body)));
+
+        if (apply_handler_vec_[type]) {
+            auto fu = seastar::smp::submit_to(
+                apply_handler_vec_[type].get_owner_shard(),
+                [type, this, reqid = std::move(reqid), id, ctx = std::move(ctx),
+                 body =
+                     std::move(body)]() mutable -> seastar::future<Status<>> {
+                    auto local_reqid = foreign_buffer_copy(std::move(reqid));
+                    auto local_ctx = foreign_buffer_copy(std::move(ctx));
+                    auto local_body = foreign_buffer_copy(std::move(body));
+                    return apply_handler_vec_[type]->Apply(
+                        std::move(local_reqid), id, std::move(local_ctx),
+                        std::move(local_body));
+                });
+            fu_vec.emplace_back(std::move(fu));
+        }
+    }
+    auto results =
+        co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
+    for (int i = 0; i < results.size(); i++) {
+        if (!results[i]) {
+            s = results[i];
+            co_return s;
+        }
+    }
+
+    s = co_await SaveApplied(index, false);
+    applied_ = index;
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::ApplyConfChange(
+    raft::ConfChangeType type, uint64_t node_id, std::string raft_host,
+    uint16_t raft_port, std::string host, uint16_t port, uint64_t index) {
+    Status<> s;
+    RaftNode raft_node;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+    WriteBatch batch;
+    char applied_val[sizeof(index)];
+    char key[sizeof(node_id) + 1];
+
+    net::BigEndian::PutUint64(applied_val, index);
+
+    batch.Put(std::string_view(applied_key_),
+              std::string_view(applied_val, sizeof(index)));
+    switch (type) {
+        case raft::ConfChangeType::ConfChangeAddNode:
+        case raft::ConfChangeType::ConfChangeAddLearnerNode: {
+            raft_node.set_id(node_id);
+            raft_node.set_raft_host(raft_host);
+            raft_node.set_raft_port(raft_port);
+            raft_node.set_host(host);
+            raft_node.set_port(port);
+            raft_node.set_learner(
+                type == raft::ConfChangeType::ConfChangeAddLearnerNode);
+            Buffer b(raft_node.ByteSizeLong());
+            raft_node.SerializeToArray(b.get_write(), b.size());
+
+            key[0] = static_cast<char>(ApplyType::Raft);
+            net::BigEndian::PutUint64(&key[1], node_id);
+            batch.Put(std::string_view(key, sizeof(key)),
+                      std::string_view(b.get(), b.size()));
+            raft_nodes_[raft_node.id()] = raft_node;
+            break;
+        }
+        case raft::ConfChangeType::ConfChangeRemoveNode:
+            key[0] = static_cast<char>(ApplyType::Raft);
+            net::BigEndian::PutUint64(&key[1], node_id);
+            batch.Delete(std::string_view(key, sizeof(key)));
+            raft_nodes_.erase(node_id);
+            break;
+        default:
+            break;
+    }
+    s = co_await Write(std::move(batch), true);
+    applied_ = index;
+    co_return s;
+}
+
+seastar::future<Status<SmSnapshotPtr>> Storage::CreateSnapshot() {
+    Status<SmSnapshotPtr> s;
+
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
+    seastar::sstring name = seastar::internal::to_sstring<seastar::sstring>(
+        (unsigned long)snapshot_seq_++);
+    SmSnapshotImplPtr snapshot =
+        seastar::make_shared<SmSnapshotImpl>(name, applied_, &gate_);
+    snapshot->db_ = db_.get();
+    auto st = co_await worker_thread_.Submit<
+        Status<std::tuple<const rocksdb::Snapshot*, rocksdb::Iterator*>>>(
+        [this]() -> Status<
+                     std::tuple<const rocksdb::Snapshot*, rocksdb::Iterator*>> {
+            Status<std::tuple<const rocksdb::Snapshot*, rocksdb::Iterator*>> s;
+            auto snap = db_->GetSnapshot();
+            rocksdb::ReadOptions ro;
+            ro.snapshot = snap;
+            ro.fill_cache = false;
+
+            char start_prefix[1];
+            start_prefix[0] = static_cast<char>((char)ApplyType::Raft + 1);
+            rocksdb::Slice start(start_prefix, 1);
+            ro.iterate_lower_bound = &start;
+            auto iter = db_->NewIterator(ro);
+            iter->SeekToFirst();
+            s.SetValue(std::make_tuple(snap, iter));
+            return s;
+        });
+    if (!st) {
+        LOG_ERROR("create snapshot error: {}", st);
+        s.Set(st.Code(), st.Reason());
+        co_return s;
+    }
+    snapshot->snapshot_ = std::get<0>(st.Value());
+    snapshot->iter_ = std::get<1>(st.Value());
+    s.SetValue(snapshot);
+    co_return s;
+}
+
+bool Storage::RegisterApplyHandler(
+    ApplyType type, seastar::foreign_ptr<ApplyHandlerPtr> handler) {
+    if (apply_handler_vec_[(int)type]) {
+        return false;
+    }
+
+    apply_handler_vec_[(int)type] = std::move(handler);
+    return true;
+}
+
+seastar::future<Status<>> Storage::ApplySnapshot(raft::SnapshotPtr meta,
+                                                 SmSnapshotPtr body) {
+    SnapshotMetaPayload meta_payload;
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_await body->Close();
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+    if (!meta_payload.ParseFromArray(meta->data().get(), meta->data().size())) {
+        s.Set(ErrCode::ErrUnExpect, "failed to parse meta");
+        co_await body->Close();
+        co_return s;
+    }
+
+    char start_key[1] = {static_cast<char>(ApplyType::Raft)};
+    char end_key[1] = {static_cast<char>(ApplyType::Max)};
+
+    s = co_await DeleteRange(Buffer(start_key, 1, seastar::deleter()),
+                             Buffer(end_key, 1, seastar::deleter()));
+
+    if (!s) {
+        LOG_ERROR("delete data for snapshot={} error: {}", body->Name(), s);
+        co_await body->Close();
+        co_return s;
+    }
+    for (int i = 0; i < apply_handler_vec_.size(); i++) {
+        if (apply_handler_vec_[i]) {
+            co_await seastar::smp::submit_to(
+                apply_handler_vec_[i].get_owner_shard(),
+                [idx = i, this] { apply_handler_vec_[idx]->Reset(); });
+        }
+    }
+
+    for (;;) {
+        auto st = co_await body->Read();
+        if (!st) {
+            LOG_ERROR("read data for snapshot={} error: {}", body->Name(), st);
+            s.Set(st.Code(), st.Reason());
+            co_await body->Close();
+            co_return s;
+        }
+        if (st.Value().empty()) {
+            break;
+        }
+
+        WriteBatch batch;
+        std::vector<Buffer> key_vec;
+        std::vector<Buffer> value_vec;
+        Buffer b = std::move(st.Value());
+
+        while (!b.empty()) {
+            Buffer key, value;
+            for (int i = 0; i < 2; i++) {
+                uint32_t len = 0;
+                const char* p = GetVarint32(b.get(), b.size(), &len);
+                if (p == nullptr) {
+                    s.Set(EINVAL);
+                    LOG_ERROR(
+                        "snapshot={} body is invalid, it cann't unmarshal",
+                        body->Name());
+                    co_await body->Close();
+                    co_return s;
+                }
+                b.trim_front(b.get() - p);
+                if (b.size() < len) {
+                    s.Set(EINVAL);
+                    LOG_ERROR(
+                        "snapshot={} body is invalid, it cann't unmarshal",
+                        body->Name());
+                    co_await body->Close();
+                    co_return s;
+                }
+                if (i == 0) {
+                    key = std::move(b.share(0, len));
+                } else {
+                    value = std::move(b.share(0, len));
+                }
+                b.trim_front(len);
+            }
+            batch.Put(std::string_view(key.get(), key.size()),
+                      std::string_view(value.get(), value.size()));
+            key_vec.emplace_back(std::move(key));
+            value_vec.emplace_back(std::move(value));
+        }
+
+        s = co_await Write(std::move(batch));
+        if (!s) {
+            LOG_ERROR("save snapshot={} body error: {}", body->Name(), st);
+            s.Set(st.Code(), st.Reason());
+            co_await body->Close();
+            co_return s;
+        }
+
+        for (int i = 0; i < key_vec.size(); i++) {
+            ApplyType type = static_cast<ApplyType>(key_vec[i][0]);
+            if (!apply_handler_vec_[(int)type]) {
+                continue;
+            }
+            seastar::foreign_ptr<std::unique_ptr<Buffer>> key =
+                seastar::make_foreign(
+                    std::make_unique<Buffer>(std::move(key_vec[i].share())));
+            seastar::foreign_ptr<std::unique_ptr<Buffer>> value =
+                seastar::make_foreign(
+                    std::make_unique<Buffer>(std::move(value_vec[i].share())));
+            co_await seastar::smp::submit_to(
+                apply_handler_vec_[(int)type].get_owner_shard(),
+                [type, this, key = std::move(key),
+                 value = std::move(value)]() mutable {
+                    auto local_key = foreign_buffer_copy(std::move(key));
+                    auto local_value = foreign_buffer_copy(std::move(value));
+                    apply_handler_vec_[(int)type]->Restore(
+                        std::move(local_key), std::move(local_value));
+                });
+        }
+    }
+
+    WriteBatch batch;
+    applied_ = meta->metadata().index();
+    char applied_val[sizeof(applied_)];
+    net::BigEndian::PutUint64(applied_val, applied_);
+    batch.Put(std::string_view(applied_key_),
+              std::string_view(applied_val, sizeof(applied_val)));
+
+    int n = meta_payload.nodes_size();
+    for (int i = 0; i < n; ++i) {
+        const auto& raft_node = meta_payload.nodes(i);
+        Buffer b(raft_node.ByteSizeLong());
+        raft_node.SerializeToArray(b.get_write(), b.size());
+        char key[sizeof(uint64_t) + 1];
+        key[0] = static_cast<char>(ApplyType::Raft);
+        net::BigEndian::PutUint64(&key[1], raft_node.id());
+        batch.Put(std::string_view(key, sizeof(key)),
+                  std::string_view(b.get(), b.size()));
+    }
+
+    s = co_await Write(std::move(batch), true);
+    co_await body->Close();
+    co_return s;
+}
+
+void Storage::LeadChange(uint64_t node_id) { lead_ = node_id; }
+
+seastar::future<Status<>> Storage::Propose(RaftServerPtr raft, Buffer reqid,
+                                           uint64_t id, ApplyType type,
+                                           Buffer ctx, Buffer data) {
+    ApplyEntry entry;
+    entry.reqid = reqid.share();
+    entry.id = id;
+    entry.type = type;
+    entry.ctx = ctx.share();
+    entry.body = data.share();
+
+    auto b = entry.Marshal();
+    return raft->Propose(b.share());
+}
+
+seastar::future<Status<>> Storage::Put(Buffer key, Buffer val, bool sync) {
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+    s = co_await worker_thread_.Submit<Status<>>(
+        [this, &key, &val, sync]() -> Status<> {
+            Status<> s;
+            rocksdb::WriteOptions wo;
+            wo.sync = sync;
+            wo.disableWAL = true;
+
+            auto st = db_->Put(wo, rocksdb::Slice(key.get(), key.size()),
+                               rocksdb::Slice(val.get(), val.size()));
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+            }
+            return s;
+        });
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::Write(WriteBatch batch, bool sync) {
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+    s = co_await worker_thread_.Submit<Status<>>(
+        [this, &batch, sync]() -> Status<> {
+            Status<> s;
+            rocksdb::WriteOptions wo;
+            wo.sync = sync;
+            wo.disableWAL = true;
+
+            auto st = db_->Write(wo, &batch.batch_);
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+            }
+            return s;
+        });
+
+    co_return s;
+}
+
+seastar::future<Status<Buffer>> Storage::Get(Buffer key) {
+    Status<Buffer> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
+    auto st = co_await worker_thread_.Submit<Status<std::string>>(
+        [this, &key]() -> Status<std::string> {
+            rocksdb::ReadOptions ro;
+            Status<std::string> s;
+            std::string value;
+            auto st =
+                db_->Get(ro, rocksdb::Slice(key.get(), key.size()), &value);
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                return s;
+            }
+            s.SetValue(std::move(value));
+            return std::move(s);
+        });
+    if (!st) {
+        s.Set(st.Code(), st.Reason());
+        co_return s;
+    }
+    if (!st.Value().size()) {
+        co_return s;  // return empty value
+    }
+
+    Buffer b = Buffer::copy_of(st.Value());
+    s.SetValue(std::move(b));
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::Delete(Buffer key, bool sync) {
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
+    auto st = co_await worker_thread_.Submit<Status<>>(
+        [this, &key, sync]() -> Status<> {
+            rocksdb::WriteOptions wo;
+            Status<> s;
+            wo.sync = sync;
+            wo.disableWAL = true;
+
+            auto st = db_->Delete(wo, rocksdb::Slice(key.get(), key.size()));
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                return s;
+            }
+            return s;
+        });
+    if (!st) {
+        s.Set(st.Code(), st.Reason());
+    }
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::DeleteRange(Buffer start, Buffer end,
+                                               bool sync) {
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+    WriteBatch batch;
+    batch.DeleteRange(std::string_view(start.get(), start.size()),
+                      std::string_view(end.get(), end.size()));
+    s = co_await Write(std::move(batch), sync);
+    co_return s;
+}
+
+seastar::future<Status<>> Storage::Range(
+    Buffer start, Buffer end,
+    seastar::noncopyable_function<void(const std::string&, const std::string&)>
+        fn) {
+    Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(EPIPE);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
+    s = co_await worker_thread_.Submit<Status<>>(
+        [this, &start, &end, fn = std::move(fn)]() -> Status<> {
+            rocksdb::ReadOptions ro;
+            Status<> s;
+
+            rocksdb::Slice lower_bound(start.get(), start.size());
+            rocksdb::Slice upper_bound(end.get(), end.size());
+            ro.fill_cache = false;
+            ro.iterate_lower_bound = &lower_bound;
+            ro.iterate_upper_bound = &upper_bound;
+
+            auto iter = db_->NewIterator(ro);
+            for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+                auto key = iter->key();
+                auto value = iter->value();
+                fn(key.ToString(), value.ToString());
+            }
+            auto st = iter->status();
+            if (!st.ok()) {
+                s.Set(ErrCode::ErrUnExpect, st.ToString());
+            }
+            delete iter;
+            return s;
+        });
+    co_return s;
+}
+
+std::vector<RaftNode> Storage::GetRaftNodes() const {
+    std::vector<RaftNode> nodes;
+    for (auto iter : raft_nodes_) {
+        nodes.push_back(iter.second);
+    }
+    return nodes;
+}
+
+seastar::future<> Storage::Close() {
+    if (gate_.is_closed()) {
+        co_return;
+    }
+
+    co_await gate_.close();
+    co_return;
+}
+
+}  // namespace stream
+}  // namespace snail

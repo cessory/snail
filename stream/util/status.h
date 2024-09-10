@@ -19,6 +19,7 @@ enum class ErrCode {
     ErrTooShort = 20007,
     ErrTooLarge = 20008,
     ErrInvalidChecksum = 20010,
+    ErrCluster = 20011,
 
     ///////////raft error///////////
     ErrRaftCompacted = 21000,
@@ -37,7 +38,10 @@ enum class ErrCode {
     ErrRaftStepLocalMsg = 21013,
     ErrRaftStepPeerNotFound = 21014,
     ErrRaftAbort = 21015,
-    ErrUnExpect = 29999
+    ErrUnExpect = 29999,
+
+    //////////master error///////
+    ErrExtentNodeNotExist = 31000,
 };
 
 const char* GetReason(ErrCode code);

@@ -60,6 +60,8 @@ class RawNode {
 
     seastar::future<Status<>> Step(MessagePtr m);
 
+    seastar::future<Status<>> RawStep(MessagePtr m);
+
     seastar::future<Status<ReadyPtr>> GetReady();
 
     bool HasReady();
@@ -83,6 +85,10 @@ class RawNode {
     seastar::future<Status<>> ReadIndex(seastar::temporary_buffer<char> rctx);
 
     bool HasAbort() const { return abort_; }
+
+    void Close() { abort_ = true; }
+
+    uint64_t ID() const { return raft_->id_; }
 
    private:
     ProgressMap GetProgressCopy();

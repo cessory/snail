@@ -182,7 +182,7 @@ bool Entry::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 EntryPtr make_entry() { return seastar::make_lw_shared<Entry>(); }
@@ -321,7 +321,7 @@ bool ConfState::Unmarshal(seastar::temporary_buffer<char> data) {
             auto_leave_ = true;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 bool SnapshotMetadata::Empty() const {
@@ -425,7 +425,7 @@ bool SnapshotMetadata::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 SnapshotPtr make_snapshot() { return seastar::make_lw_shared<Snapshot>(); }
@@ -526,7 +526,7 @@ bool Snapshot::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == data.end() ? true : false;
+    return true;
 }
 
 MessagePtr make_raft_message() { return seastar::make_lw_shared<Message>(); }
@@ -793,7 +793,7 @@ bool Message::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 void HardState::Reset() {
@@ -877,7 +877,7 @@ bool HardState::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 bool ConfChange::Empty() const {
@@ -981,7 +981,7 @@ bool ConfChange::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 seastar::temporary_buffer<char> ConfChange::Marshal() {
@@ -1075,7 +1075,7 @@ bool ConfChangeSingle::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 seastar::temporary_buffer<char> ConfChangeSingle::Marshal() {
@@ -1224,7 +1224,7 @@ bool ConfChangeV2::Unmarshal(seastar::temporary_buffer<char> data) {
                 break;
         }
     }
-    return s == end ? true : false;
+    return true;
 }
 
 seastar::temporary_buffer<char> ConfChangeV2::Marshal() {

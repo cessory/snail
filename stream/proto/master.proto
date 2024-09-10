@@ -1,8 +1,19 @@
 syntax="proto3";
 package snail.stream;
 
+import "common.proto";
+
+enum MasterMsgType {
+    ALLOC_DISKID_REQ = 0; 
+    ALLOC_DISKID_RESP = 1; 
+    ADD_NODE_REQ = 2;
+    ADD_NODE_RESP = 3;
+    ADD_DISK_REQ = 4;
+    ADD_DISK_RESP = 5;
+}
+
 message RaftNode {
-    uint64 node_id = 1;
+    uint64 id = 1;
     string raft_host = 2;
     uint32 raft_port = 3;
     string host = 4;
@@ -14,4 +25,37 @@ message SnapshotMetaPayload {
     string name = 1;
     repeated RaftNode nodes = 2; 
 }
+
+message AllocDiskIdReq {
+    CommonReq header = 1;
+    uint32 count = 2; 
+}
+
+message AllocDiskIdResp {
+    CommonResp header = 1;
+    uint32 start = 2; 
+    uint32 count = 3;
+}
+
+message AddNodeReq {
+    CommonReq header = 1;
+    string host = 2;
+    uint32 port = 3;
+    string rack = 4;
+    string az   = 5;
+}
+
+message AddNodeResp {
+    CommonResp header = 1;
+    uint32 node_id = 2;
+}
+
+message AddDiskReq {
+    CommonReq header = 1;
+    uint32 diskid = 2;
+    uint32 node_id = 3;
+    uint32 port = 4;
+}
+
+
 
