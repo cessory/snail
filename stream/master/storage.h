@@ -68,7 +68,7 @@ class Storage : public Statemachine {
     std::array<seastar::foreign_ptr<ApplyHandlerPtr>, (int)ApplyType::Max>
         apply_handler_vec_;
 
-    seastar::future<Status<>> LoadRaft();
+    seastar::future<Status<>> LoadRaftConfig();
 
     seastar::future<Status<>> SaveApplied(uint64_t index, bool sync);
 

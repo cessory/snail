@@ -1,32 +1,48 @@
 #include <yaml-cpp/yaml.h>
 
+#include <boost/program_options.hpp>
+#include <seastar/core/app-template.hh>
+#include <seastar/core/thread.hh>
+
+#include "id_generator.h"
 #include "proto/master.pb.h"
 #include "raft_server.h"
+#include "storage.h"
+#include "util/logger.h"
 
 struct RaftConfig {
     uint64_t id;
     std::string raft_wal_path;
-    uint32_t ticket_interval;
+    uint32_t tick_interval;
     uint32_t heartbeat_tick;
     uint32_t election_tick;
     std::vector<snail::stream::RaftNode> raft_nodes;
 
-    void ParseRaftConfig(const YAML::Node& node) {
+    bool ParseRaftConfig(const YAML::Node& node) {
         raft_wal_path = node["wal_path"].as<std::string>();
-        ticket_interval = node["ticket_interval"].as<uint32_t>();
+        tick_interval = node["tick_interval"].as<uint32_t>();
         heartbeat_tick = node["heartbeat_tick"].as<uint32_t>();
         heartbeat_tick = node["election_tick"].as<uint32_t>();
         YAML::Node raft_nodes_doc = node["nodes"];
+
+        std::unordered_set<uint64_t> id_set;
         for (auto child : raft_nodes_doc) {
-            RaftNode raft_node;
-            raft_node.set_id(child["id"].as<uint64_t>());
+            snail::stream::RaftNode raft_node;
+            auto id = child["id"].as<uint64_t>();
+            if (id_set.count(id)) {
+                LOG_ERROR("has duplicate id in raft config");
+                return false;
+            }
+            id_set.insert(id);
+            raft_node.set_id(id);
             raft_node.set_raft_host(child["raft_host"].as<std::string>());
             raft_node.set_raft_port(child["raft_port"].as<uint16_t>());
             raft_node.set_host(child["host"].as<std::string>());
-            raft_node.set_port(child["port"].as<std::string>());
+            raft_node.set_port(child["port"].as<uint16_t>());
             raft_node.set_learner(child["learner"].as<bool>());
             raft_nodes.push_back(raft_node);
         }
+        return true;
     }
 };
 
@@ -66,21 +82,26 @@ struct Config {
             hugedir = doc["hugedir"].as<std::string>();
         }
         db_path = doc["db_path"].as<std::string>();
-        raft_cfg.ParseRaftConfig(doc["raft"]);
+        if (!raft_cfg.ParseRaftConfig(doc["raft"])) {
+            throw std::runtime_error("parse raft config error");
+        }
         bool found = false;
         for (int i = 0; i < raft_cfg.raft_nodes.size(); i++) {
             if (host == raft_cfg.raft_nodes[i].host() &&
                 port == raft_cfg.raft_nodes[i].port()) {
                 found = true;
-                raft_cfg.id = raft_nodes[i].id();
+                raft_cfg.id = raft_cfg.raft_nodes[i].id();
                 break;
             }
         }
         if (!found) {
-            throw std::system_error("not found our self raft_id in raft nodes");
+            throw std::runtime_error(
+                "not found our self raft_id in raft nodes");
         }
     }
 };
+
+namespace bpo = boost::program_options;
 
 int main(int argc, char* argv[]) {
     boost::program_options::options_description desc;
@@ -127,11 +148,9 @@ int main(int argc, char* argv[]) {
     seastar::app_template app(std::move(opts));
 
     char* args[1] = {argv[0]};
-    return app.run(1, args, []() -> seastar::future<> {
-        return seastar::async([] {
-            auto st =
-                snail::stream::Storage::Create(cfg.db_path, cfg.raft_cfg.id)
-                    .get0();
+    return app.run(1, args, [&cfg]() -> seastar::future<> {
+        return seastar::async([&cfg] {
+            auto st = snail::stream::Storage::Create(cfg.db_path).get0();
             if (!st) {
                 LOG_ERROR("create storage error: {}", st);
                 return;
@@ -157,7 +176,8 @@ int main(int argc, char* argv[]) {
             auto st1 =
                 snail::stream::RaftServer::Create(
                     opt, applied, std::move(raft_nodes),
-                    seastar::dynamic_pointer_cast<StatemachinePtr, StoragePtr>(
+                    seastar::dynamic_pointer_cast<snail::stream::Statemachine,
+                                                  snail::stream::Storage>(
                         store))
                     .get0();
             if (!st1) {

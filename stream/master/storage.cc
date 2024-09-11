@@ -271,7 +271,7 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
 
     std::string path(db_path);
     seastar::shared_ptr<Storage> store_ptr =
-        seastar::make_shared<Storage>(std::move(path), std::move(node_id));
+        seastar::make_shared<Storage>(std::move(path));
     auto st = co_await store_ptr->worker_thread_.Submit<Status<rocksdb::DB*>>(
         [db_path]() -> Status<rocksdb::DB*> {
             Status<rocksdb::DB*> s;
@@ -296,7 +296,7 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
     }
     std::unique_ptr<rocksdb::DB> db_ptr(st.Value());
     store_ptr->db_ = std::move(db_ptr);
-    auto st2 = co_await store_ptr->LoadRaft();
+    auto st2 = co_await store_ptr->LoadRaftConfig();
     if (!st2) {
         LOG_ERROR("load data from db error: {}", st2);
         s.Set(st2.Code(), st2.Reason());
@@ -306,7 +306,7 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
     co_return s;
 }
 
-seastar::future<Status<>> Storage::LoadRaft() {
+seastar::future<Status<>> Storage::LoadRaftConfig() {
     Status<> s;
 
     s = co_await worker_thread_.Submit<Status<>>([this]() -> Status<> {

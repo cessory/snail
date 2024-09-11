@@ -15,7 +15,7 @@ add_library(MASTER_OBJS OBJECT ${src})
 target_link_libraries(MASTER_OBJS Seastar::seastar)
 
 add_executable(master main.cc)
-target_link_libraries(master $<TARGET_OBJECTS:NET_OBJS> $<TARGET_OBJECTS:UTIL_OBJS> $<TARGET_OBJECTS:PROTO_OBJS> $<TARGET_OBJECTS:MASTER_OBJS> protobuf::libprotobuf ${SPDK_LIBRARIES} ${ISAL_LIBRARIES} ${OPENSSL_LIBRARIES} uuid Seastar::seastar)
+target_link_libraries(master $<TARGET_OBJECTS:NET_OBJS> $<TARGET_OBJECTS:UTIL_OBJS> $<TARGET_OBJECTS:PROTO_OBJS> $<TARGET_OBJECTS:RAFT_OBJS> $<TARGET_OBJECTS:MASTER_OBJS> protobuf::libprotobuf ${SPDK_LIBRARIES} ${ISAL_LIBRARIES} ${OPENSSL_LIBRARIES} rocksdb z bz2 lz4 uuid Seastar::seastar)
 
 #add_subdirectory(tests)
 
