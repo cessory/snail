@@ -103,6 +103,34 @@ struct Config {
 
 namespace bpo = boost::program_options;
 
+static seastar::future<Status<>> StartRaft(RaftConfig cfg) {}
+
+static seastar::future<> ServerStart(Config cfg) {
+    auto st1 = co_await snail::stream::Storage::Create(cfg.db_path);
+    if (!st1) {
+        LOG_ERROR("create storage error: {}", st1);
+        co_return;
+    }
+    snail::stream::StoragePtr store = st1.Value();
+    // TODO register apply handler
+    seastar::foreign_ptr<snail::stream::StoragePtr> foreign_store(
+        std::move(store));
+
+    snail::stream::RaftServerOption opt;
+    opt.node_id = cfg.raft_cfg.id;
+    opt.tick_interval = cfg.raft_cfg.tick_interval;
+    opt.heartbeat_tick = cfg.raft_cfg.heartbeat_tick;
+    opt.election_tick = cfg.raft_cfg.election_tick;
+    opt.wal_dir = cfg.raft_cfg.raft_wal_path;
+
+    auto st2 = co_await foreign_store->Start(opt, cfg.raft_cfg.raft_nodes);
+    if (!st2) {
+        LOG_ERROR("create raft server error: {}", st2);
+        co_await store->Close();
+        co_return;
+    }
+}
+
 int main(int argc, char* argv[]) {
     boost::program_options::options_description desc;
     desc.add_options()("help,h", "show help message");
@@ -150,49 +178,19 @@ int main(int argc, char* argv[]) {
     char* args[1] = {argv[0]};
     return app.run(1, args, [&cfg]() -> seastar::future<> {
         return seastar::async([&cfg] {
-            auto st = snail::stream::Storage::Create(cfg.db_path).get0();
-            if (!st) {
-                LOG_ERROR("create storage error: {}", st);
-                return;
-            }
             snail::stream::StoragePtr store = st.Value();
             snail::stream::IDGeneratorPtr id_gen =
                 seastar::make_lw_shared<snail::stream::IDGenerator>(
                     cfg.raft_cfg.id);
 
-            snail::stream::RaftServerOption opt;
-            opt.node_id = cfg.raft_cfg.id;
-            opt.tick_interval = cfg.raft_cfg.tick_interval;
-            opt.heartbeat_tick = cfg.raft_cfg.heartbeat_tick;
-            opt.election_tick = cfg.raft_cfg.election_tick;
-            opt.wal_dir = cfg.raft_cfg.raft_wal_path;
-
-            uint64_t applied = store->Applied();
-            std::vector<snail::stream::RaftNode> raft_nodes =
-                store->GetRaftNodes();
-            if (raft_nodes.empty()) {
-                raft_nodes = cfg.raft_cfg.raft_nodes;
-            }
-            auto st1 =
-                snail::stream::RaftServer::Create(
-                    opt, applied, std::move(raft_nodes),
-                    seastar::dynamic_pointer_cast<snail::stream::Statemachine,
-                                                  snail::stream::Storage>(
-                        store))
-                    .get0();
-            if (!st1) {
-                LOG_ERROR("create raft server error: {}", st1);
-                store->Close().get();
-                return;
-            }
-            snail::stream::RaftServerPtr raft = st1.Value();
             for (;;) {
-                // load wal
-                auto st2 = raft->ReadIndex().get0();
+                auto st2 = store->ReadIndex().get0();
                 if (st2) {
                     break;
                 }
             }
+
+            // start tcp server TODO
         });
     });
 }

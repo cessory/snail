@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <seastar/core/shared_ptr.hh>
 
 namespace snail {
@@ -6,7 +7,7 @@ namespace stream {
 
 class IDGenerator {
     uint64_t prefix_;
-    uint64_t suffix_;
+    std::atomic_uint64_t suffix_;
 
    public:
     explicit IDGenerator(uint64_t node_id);
@@ -14,7 +15,7 @@ class IDGenerator {
     uint64_t Next();
 };
 
-using IDGeneratorPtr = seastar::lw_shared_ptr<IDGenerator>;
+using IDGeneratorPtr = seastar::shared_ptr<IDGenerator>;
 
 }  // namespace stream
 }  // namespace snail

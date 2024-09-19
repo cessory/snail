@@ -9,9 +9,8 @@
 namespace snail {
 namespace stream {
 
-Server::Server(const std::string& host, uint16_t port, StoragePtr store,
-               RaftServerPtr raft, ServicePtr service)
-    : host_(host), port_(port), store_(store), raft_(raft), service_(service) {}
+Server::Server(const std::string& host, uint16_t port, ServicePtr service)
+    : host_(host), port_(port), service_(service) {}
 
 seastar::future<> Server::HandleSession(net::SessionPtr sess) {
     if (!gate_.is_closed()) {

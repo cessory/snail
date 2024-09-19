@@ -9,9 +9,14 @@
 namespace snail {
 namespace stream {
 
+class ExtentnodeMgr;
+
+using ExtentnodeMgrPtr = seastar::shared_ptr<ExtentnodeMgr>;
+
 class ExtentnodeMgr : public ApplyHandler {
-    StoragePtr store_;
-    IDGeneratorPtr id_gen_;
+    unsigned shard_;
+    Storage* store_;
+    IDGenerator* id_gen_;
     ApplyType type_;
     uint32_t next_node_id_;
     Buffer node_id_key_;
@@ -49,45 +54,46 @@ class ExtentnodeMgr : public ApplyHandler {
         rack_index_map_;
     std::unordered_map<std::string, std::unordered_set<uint32_t>> az_index_map_;
 
-    seastar::future<Status<>> ApplyAddNode(uint64_t id, extent_node_ptr ptr);
-    seastar::future<Status<>> ApplyRemoveNode(uint64_t id, extent_node_ptr ptr);
-    seastar::future<Status<>> ApplyUpdateNode(uint64_t id, extent_node_ptr ptr);
+    seastar::future<Status<>> ApplyAddNode(Buffer reqid, uint64_t id,
+                                           extent_node_ptr ptr);
+    seastar::future<Status<>> ApplyRemoveNode(Buffer reqid, uint64_t id,
+                                              extent_node_ptr ptr);
+    seastar::future<Status<>> ApplyUpdateNode(BUffer reqid, uint64_t id,
+                                              extent_node_ptr ptr);
 
     seastar::future<Status<uint32_t>> Propose(
-        RaftServerPtr raft, Buffer reqid, OP op, Buffer data,
-        std::chrono::milliseconds timeout);
-
-   public:
-    explicit ExtentnodeMgr(StoragePtr store, IDGeneratorPtr id_gen,
-                           ApplyType type);
-    virtual ~ExtentnodeMgr() {}
+        Buffer reqid, OP op, Buffer data, std::chrono::milliseconds timeout);
 
     seastar::future<Status<>> Init();
+
+   public:
+    explicit ExtentnodeMgr(Storage* store, IDGenerator* id_gen, ApplyType type);
+    virtual ~ExtentnodeMgr() {}
+
+    static seastar::future<Status<ExtentnodeMgrPtr>> Create(
+        Storage* store, IDGenerator* id_gen);
+
     seastar::future<Status<>> Apply(Buffer reqid, uint64_t id, Buffer ctx,
                                     Buffer data) override;
-    void Reset() override;
+    seastar::future<Status<>> Reset() override;
 
-    void Restore(Buffer key, Buffer val) override;
+    seastar::future<Status<>> Restore(Buffer key, Buffer val) override;
 
     seastar::future<Status<uint32_t>> AddNode(
-        RaftServerPtr raft, Buffer reqid, std::string_view host, uint16_t port,
+        Buffer reqid, std::string_view host, uint16_t port,
         std::string_view rack, std::string_view az,
         std::chrono::milliseconds timeout);
 
-    seastar::future<Status<>> RemoveNode(RaftServerPtr raft, Buffer reqid,
-                                         uint32_t node_id,
+    seastar::future<Status<>> RemoveNode(Buffer reqid, uint32_t node_id,
                                          std::string_view host, uint16_t port,
                                          std::chrono::milliseconds timeout);
 
-    seastar::future<Status<>> UpdateNode(RaftServerPtr raft, Buffer reqid,
-                                         uint32_t node_id,
+    seastar::future<Status<>> UpdateNode(Buffer reqid, uint32_t node_id,
                                          std::string_view host,
                                          std::string_view rack,
                                          std::string_view az,
                                          std::chrono::milliseconds timeout);
 };
-
-using ExtentnodeMgrPtr = seastar::shared_ptr<ExtentnodeMgr>;
 
 }  // namespace stream
 }  // namespace snail

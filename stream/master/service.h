@@ -8,11 +8,13 @@ namespace stream {
 class Service {
     uint32_t timeout_;  // request timeout(ms)
     uint32_t cluster_id_;
-    RaftServerPtr raft_;
-    IdAllocatorPtr diskid_alloctor_;
-    ExtentnodeMgrPtr extentnode_mgr_;
+    IdAllocator* diskid_alloctor_;
+    ExtentnodeMgr* extentnode_mgr_;
 
    public:
+    explicit Service(IdAllocator* diskid_allocator,
+                     ExtentnodeMgr* extentnode_mgr);
+
     seastar::future<Status<>> HandleMessage(net::Stream* stream, Buffer b);
     // alloca an disk id
     seastar::future<Status<>> HandleAllocaDiskID(const AllocDiskIdReq* req,

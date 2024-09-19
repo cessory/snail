@@ -68,8 +68,8 @@ seastar::future<Status<>> Service::HandleAllocaDiskID(const AllocDiskIdReq* req,
     }
     resp.mutable_header()->set_reqid(req->header().reqid());
     std::chrono::milliseconds timeout{timeout_};
-    auto st = co_await diskid_alloctor_->Alloc(raft_, reqid.share(),
-                                               req->count(), timeout);
+    auto st =
+        co_await diskid_alloctor_->Alloc(reqid.share(), req->count(), timeout);
     resp.mutable_header()->set_code(static_cast<int32_t>(st.Code()));
     if (!st) {
         resp.mutable_header()->set_reason(st.Reason());

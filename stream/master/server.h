@@ -10,8 +10,6 @@ namespace stream {
 class Server {
     std::string host_;
     uint16_t port_;
-    StoragePtr store_;
-    RaftServerPtr raft_;
     ServicePtr service_;
 
     seastar::gate gate_;

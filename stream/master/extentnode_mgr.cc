@@ -157,9 +157,12 @@ bool ExtentnodeMgr::extent_node::Unmarshal(std::string_view b) {
     return true;
 }
 
-ExtentnodeMgr::ExtentnodeMgr(StoragePtr store, IDGeneratorPtr id_gen,
+ExtentnodeMgr::ExtentnodeMgr(Storage* store, IDGenerator* id_gen,
                              ApplyType type)
-    : store_(store), id_gen_(id_gen), type_(type) {}
+    : shard_(seastar::this_shard_id()),
+      store_(store),
+      id_gen_(id_gen),
+      type_(type) {}
 
 seastar::future<Status<>> ExtentnodeMgr::Init() {
     Status<> s;
@@ -195,7 +198,20 @@ seastar::future<Status<>> ExtentnodeMgr::Init() {
     co_return s;
 }
 
-seastar::future<Status<>> ExtentnodeMgr::ApplyAddNode(uint64_t id,
+seastar::future<Status<ExtentnodeMgrPtr>>::Create(Storage* store,
+                                                  IDGenerator* id_gen) {
+    Status<ExtentnodeMgrPtr> s;
+    ExtentnodeMgrPtr ptr = seastar::make_shared(store, id_gen, ApplyType::Node);
+    auto st = co_await ptr->Init();
+    if (!st) {
+        s.Set(st.Code(), st.Reason());
+        co_return s;
+    }
+    s.SetValue(ptr);
+    co_return s;
+}
+
+seastar::future<Status<>> ExtentnodeMgr::ApplyAddNode(Buffer reqid, uint64_t id,
                                                       extent_node_ptr ptr) {
     Status<> s;
     Status<uint32_t> st;
@@ -273,7 +289,8 @@ seastar::future<Status<>> ExtentnodeMgr::ApplyAddNode(uint64_t id,
     co_return s;
 }
 
-seastar::future<Status<>> ExtentnodeMgr::ApplyRemoveNode(uint64_t id,
+seastar::future<Status<>> ExtentnodeMgr::ApplyRemoveNode(Buffer reqid,
+                                                         uint64_t id,
                                                          extent_node_ptr ptr) {
     Status<> s;
     Status<uint32_t> st;
@@ -343,7 +360,8 @@ seastar::future<Status<>> ExtentnodeMgr::ApplyRemoveNode(uint64_t id,
     co_return s;
 }
 
-seastar::future<Status<>> ExtentnodeMgr::ApplyUpdateNode(uint64_t id,
+seastar::future<Status<>> ExtentnodeMgr::ApplyUpdateNode(Buffer reqid,
+                                                         uint64_t id,
                                                          extent_node_ptr ptr) {
     Status<> s;
     Status<uint32_t> st;
@@ -411,58 +429,90 @@ seastar::future<Status<>> ExtentnodeMgr::ApplyUpdateNode(uint64_t id,
 
 seastar::future<Status<>> ExtentnodeMgr::Apply(Buffer reqid, uint64_t id,
                                                Buffer ctx, Buffer data) {
-    Status<> s;
-    Status<uint32_t> st;
+    auto foreign_reqid =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(reqid)));
+    auto foreign_data =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(data)));
     OP op = static_cast<ExtentnodeMgr::OP>(ctx[0]);
-    extent_node_ptr node_ptr = seastar::make_lw_shared<extent_node>();
-    if (!node_ptr->Unmarshal(std::string_view(data.get(), data.size()))) {
-        s.Set(EBADMSG);
-        co_return s;
-    }
 
-    switch (op) {
-        case OP::ADD_NODE:
-            s = co_await ApplyAddNode(id, node_ptr);
-            break;
-        case OP::REMOVE_NODE:
-            s = co_await ApplyRemoveNode(id, node_ptr);
-            break;
-        case OP::UPDATE_NODE:
-            s = co_await ApplyUpdateNode(id, node_ptr);
-            break;
-        default:
-            s.Set(EINVAL);
-            break;
-    }
-    co_return s;
+    return seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda(
+                    [this, foreign_reqid = std::move(foreign_reqid), id, op,
+                     foreign_data = std::move(
+                         foreign_data)]() mutable -> seastar::future<Status<>> {
+                        Status<> s;
+                        Status<uint32_t> st;
+                        extent_node_ptr node_ptr =
+                            seastar::make_lw_shared<extent_node>();
+                        auto local_reqid =
+                            foreign_buffer_copy(std::move(foreign_reqid));
+                        auto local_data =
+                            foreign_buffer_copy(std::move(foreign_data));
+                        if (!node_ptr->Unmarshal(std::string_view(
+                                local_data.get(), local_data.size()))) {
+                            s.Set(EBADMSG);
+                            co_return s;
+                        }
+
+                        switch (op) {
+                            case OP::ADD_NODE:
+                                s = co_await ApplyAddNode(
+                                    std::move(local_reqid), id, node_ptr);
+                                break;
+                            case OP::REMOVE_NODE:
+                                s = co_await ApplyRemoveNode(
+                                    std::move(local_reqid), id, node_ptr);
+                                break;
+                            case OP::UPDATE_NODE:
+                                s = co_await ApplyUpdateNode(
+                                    std::move(local_reqid), id, node_ptr);
+                                break;
+                            default:
+                                s.Set(EINVAL);
+                                break;
+                        }
+                        co_return s;
+                    }));
 }
 
-void ExtentnodeMgr::Reset() {
-    next_node_id_ = 1;
-    pendings_.clear();
-    all_node_map_.clear();
-    host_index_map_.clear();
-    rack_index_map_.clear();
-    az_index_map_.clear();
+seastar::future<Status<>> ExtentnodeMgr::Reset() {
+    return seastar::smp::submit_to(shard_, [this]() -> Status<> {
+        next_node_id_ = 1;
+        pendings_.clear();
+        all_node_map_.clear();
+        host_index_map_.clear();
+        rack_index_map_.clear();
+        az_index_map_.clear();
+        return Status<>();
+    });
 }
 
-void ExtentnodeMgr::Restore(Buffer key, Buffer val) {
-    if (key == node_id_key_) {
-        next_node_id_ = net::BigEndian::Uint32(val.get());
-        return;
-    }
+seastar::future<Status<>> ExtentnodeMgr::Restore(Buffer key, Buffer val) {
+    auto foreign_key =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(key)));
+    auto foreign_val =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(val)));
 
-    extent_node_ptr node = seastar::make_lw_shared<extent_node>();
-    node->Unmarshal(std::string_view(val.get(), val.size()));
-    all_node_map_[node->node_id] = node;
-    host_index_map_[node->host] = node->node_id;
-    rack_index_map_[node->rack].insert(node->node_id);
-    az_index_map_[node->az].insert(node->node_id);
+    return seastar::smp::submit_to(shard_, foreign_key = std::move(foreign_key), foreign_val = std::move(foreign_val)]() mutable -> Status<> {
+        auto local_key = foreign_buffer_copy(std::move(foreign_key));
+        auto local_val = foreign_buffer_copy(std::move(foreign_val));
+        if (local_key == node_id_key_) {
+            next_node_id_ = net::BigEndian::Uint32(local_val.get());
+            return Status<>();
+        }
+
+        extent_node_ptr node = seastar::make_lw_shared<extent_node>();
+        node->Unmarshal(std::string_view(local_val.get(), local_val.size()));
+        all_node_map_[node->node_id] = node;
+        host_index_map_[node->host] = node->node_id;
+        rack_index_map_[node->rack].insert(node->node_id);
+        az_index_map_[node->az].insert(node->node_id);
+        return Status<>();
+    });
 }
 
 seastar::future<Status<uint32_t>> ExtentnodeMgr::Propose(
-    RaftServerPtr raft, Buffer reqid, OP op, Buffer body,
-    std::chrono::milliseconds timeout) {
+    Buffer reqid, OP op, Buffer body, std::chrono::milliseconds timeout) {
     Status<uint32_t> s;
 
     std::unique_ptr<ExtentnodeMgr::apply_item> item(new apply_item);
@@ -479,7 +529,7 @@ seastar::future<Status<uint32_t>> ExtentnodeMgr::Propose(
             pendings_.erase(id);
         });
     timer.arm(timeout);
-    auto st = co_await store_->Propose(raft, reqid.share(), id, type_,
+    auto st = co_await store_->Propose(reqid.share(), id, type_,
                                        Buffer(ctx, 1, seastar::deleter()),
                                        body.share());
     if (!st) {
@@ -495,9 +545,8 @@ seastar::future<Status<uint32_t>> ExtentnodeMgr::Propose(
 }
 
 seastar::future<Status<uint32_t>> ExtentnodeMgr::AddNode(
-    RaftServerPtr raft, Buffer reqid, std::string_view host, uint16_t port,
-    std::string_view rack, std::string_view az,
-    std::chrono::milliseconds timeout) {
+    Buffer reqid, std::string_view host, uint16_t port, std::string_view rack,
+    std::string_view az, std::chrono::milliseconds timeout) {
     Status<uint32_t> s;
     extent_node node;
 
@@ -507,15 +556,25 @@ seastar::future<Status<uint32_t>> ExtentnodeMgr::AddNode(
     node.ports.insert(port);
     Buffer body = node.Marshal();
 
-    s = co_await Propose(raft, reqid.share(), OP::ADD_NODE, body.share(),
-                         timeout);
-    co_return s;
+    seastar::foreign_ptr<std::unique_ptr<Buffer>> foreign_body =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(body)));
+    seastar::foreign_ptr<std::unique_ptr<Buffer>> foreign_reqid =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(reqid)));
+    return seastar::smp::submit_to(
+        shard_,
+        [this, timeout, foreign_body = std::move(foreign_body),
+         foreign_reqid =
+             std::move(reqid)]() mutable -> seastar::future<Status<uint32_t>> {
+            auto local_reqid = foreign_buffer_copy(std::move(foreign_reqid));
+            auto local_body = foreign_buffer_copy(std::move(foreign_body));
+            return Propose(std::move(local_reqid), OP::ADD_NODE,
+                           std::move(local_body), timeout);
+        });
 }
 
 seastar::future<Status<>> ExtentnodeMgr::RemoveNode(
-    RaftServerPtr raft, Buffer reqid, uint32_t node_id, std::string_view host,
-    uint16_t port, std::chrono::milliseconds timeout) {
-    Status<> s;
+    Buffer reqid, uint32_t node_id, std::string_view host, uint16_t port,
+    std::chrono::milliseconds timeout) {
     extent_node node;
 
     node.node_id = node_id;
@@ -523,16 +582,33 @@ seastar::future<Status<>> ExtentnodeMgr::RemoveNode(
     node.ports.insert(port);
 
     Buffer body = node.Marshal();
-    auto st = co_await Propose(raft, reqid.share(), OP::REMOVE_NODE,
-                               body.share(), timeout);
-    if (!st) {
-        s.Set(st.Code(), st.Reason());
-    }
-    co_return s;
+    seastar::foreign_ptr<std::unique_ptr<Buffer>> foreign_body =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(body)));
+    seastar::foreign_ptr<std::unique_ptr<Buffer>> foreign_reqid =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(reqid)));
+
+    return seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda(
+                    [this, foreign_reqid = std::move(foreign_reqid),
+                     foreign_body = std::move(foreign_body),
+                     timeout]() mutable -> seastar::future<Status<>> {
+                        Status<> s;
+                        auto local_reqid =
+                            foreign_buffer_copy(std::move(foreign_reqid));
+                        auto local_body =
+                            foreign_buffer_copy(std::move(foreign_body));
+                        auto st = co_await Propose(
+                            std::move(local_reqid), OP::REMOVE_NODE,
+                            std::move(local_body), timeout);
+                        if (!st) {
+                            s.Set(st.Code(), st.Reason());
+                        }
+                        co_return s;
+                    }));
 }
 
 seastar::future<Status<>> ExtentnodeMgr::UpdateNode(
-    RaftServerPtr raft, Buffer reqid, uint32_t node_id, std::string_view host,
+    Buffer reqid, uint32_t node_id, std::string_view host,
     std::string_view rack, std::string_view az,
     std::chrono::milliseconds timeout) {
     Status<> s;
@@ -544,12 +620,29 @@ seastar::future<Status<>> ExtentnodeMgr::UpdateNode(
     node.az = az;
 
     Buffer body = node.Marshal();
-    auto st = co_await Propose(raft, reqid.share(), OP::UPDATE_NODE,
-                               body.share(), timeout);
-    if (!st) {
-        s.Set(st.Code(), st.Reason());
-    }
-    co_return s;
+    seastar::foreign_ptr<std::unique_ptr<Buffer>> foreign_body =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(body)));
+    seastar::foreign_ptr<std::unique_ptr<Buffer>> foreign_reqid =
+        seastar::make_foreign(std::make_unique<Buffer>(std::move(reqid)));
+
+    return seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda(
+                    [this, foreign_reqid = std::move(foreign_reqid),
+                     foreign_body = std::move(foreign_body),
+                     timeout]() mutable -> seastar::future<Status<>> {
+                        Status<> s;
+                        auto local_reqid =
+                            foreign_buffer_copy(std::move(foreign_reqid));
+                        auto local_body =
+                            foreign_buffer_copy(std::move(foreign_body));
+                        auto st = co_await Propose(
+                            std::move(local_reqid), OP::UPDATE_NODE,
+                            std::move(local_body), timeout);
+                        if (!st) {
+                            s.Set(st.Code(), st.Reason());
+                        }
+                        co_return s;
+                    }));
 }
 
 }  // namespace stream
