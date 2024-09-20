@@ -103,18 +103,37 @@ struct Config {
 
 namespace bpo = boost::program_options;
 
-static seastar::future<Status<>> StartRaft(RaftConfig cfg) {}
-
 static seastar::future<> ServerStart(Config cfg) {
-    auto st1 = co_await snail::stream::Storage::Create(cfg.db_path);
+    auto st1 = co_await seastar::smp::submit_to(
+        2, [cfg]() -> Status<seastar::foreign_ptr<snail::stream::StoragePtr>> {
+            Status<seastar::foreign_ptr<snail::stream::StoragePtr>> s;
+            auto st = co_await snail::stream::Storage::Create(cfg.db_path);
+            if (!st) {
+                LOG_ERROR("create storage error: {}", st);
+                s.Set(st.Code(), st.Reason());
+                return s;
+            }
+            seastar::foreign_ptr<snail::stream::StoragePtr> ptr =
+                seastar::make_foreign(std::move(st.Value()));
+            s.SetValue(std::move(ptr));
+            return s;
+        });
     if (!st1) {
-        LOG_ERROR("create storage error: {}", st1);
         co_return;
     }
-    snail::stream::StoragePtr store = st1.Value();
-    // TODO register apply handler
-    seastar::foreign_ptr<snail::stream::StoragePtr> foreign_store(
-        std::move(store));
+    seastar::foreign_ptr<snail::stream::StoragePtr> foreign_store =
+        std::move(st1.Value());
+
+    auto st2 = co_await CreateDiskIdAllocator(foreign_store.get());
+    if (!st2) {
+        LOG_ERROR("create diskid allocator error: {}", st2);
+        co_return;
+    }
+    IdAllocatorPtr diskid_allocator = st2.Value();
+    ExtentnodeMgrPtr extentnode_mgr = st3.Value();
+    // register apply handler
+    foreign_store.get()->RegisterApplyHandler(diskid_allocator.get());
+    foreign_store.get()->RegisterApplyHandler(extentnode_mgr.get());
 
     snail::stream::RaftServerOption opt;
     opt.node_id = cfg.raft_cfg.id;
@@ -123,12 +142,15 @@ static seastar::future<> ServerStart(Config cfg) {
     opt.election_tick = cfg.raft_cfg.election_tick;
     opt.wal_dir = cfg.raft_cfg.raft_wal_path;
 
-    auto st2 = co_await foreign_store->Start(opt, cfg.raft_cfg.raft_nodes);
-    if (!st2) {
-        LOG_ERROR("create raft server error: {}", st2);
-        co_await store->Close();
+    auto st3 =
+        co_await foreign_store.get()->Start(opt, cfg.raft_cfg.raft_nodes);
+    if (!st3) {
+        LOG_ERROR("create raft server error: {}", st3);
+        co_await foreign_store.get()->Close();
         co_return;
     }
+
+    // TODO create tcp server
 }
 
 int main(int argc, char* argv[]) {

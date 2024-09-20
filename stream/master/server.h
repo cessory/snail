@@ -10,7 +10,7 @@ namespace stream {
 class Server {
     std::string host_;
     uint16_t port_;
-    ServicePtr service_;
+    Service* service_;
 
     seastar::gate gate_;
     seastar::pollable_fd fd_;
@@ -20,8 +20,7 @@ class Server {
     seastar::future<> HandleSession(net::SessionPtr sess);
 
    public:
-    explicit Server(const std::string& host, uint16_t port, StoragePtr store,
-                    RaftServerPtr raft, ServicePtr service);
+    explicit Server(const std::string& host, uint16_t port, Service* service);
 
     seastar::future<> Start();
 

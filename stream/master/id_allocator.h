@@ -27,10 +27,11 @@ class IdAllocator : public ApplyHandler {
     seastar::future<Status<>> Init();
 
    public:
-    explicit IdAllocator(seastar::foreign_ptr<StoragePtr> store,
-                         seastar::foreign_ptr<IDGeneratorPtr> id_gen,
-                         ApplyType type, Buffer key);
+    explicit IdAllocator(Storage* store, IDGenerator* id_gen, ApplyType type,
+                         Buffer key);
     virtual ~IdAllocator();
+
+    ApplyType Type() const override { return type_; }
 
     seastar::future<Status<>> Apply(Buffer reqid, uint64_t id, Buffer ctx,
                                     Buffer data) override;

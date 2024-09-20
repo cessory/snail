@@ -44,6 +44,8 @@ class WriteBatch {
 
 class ApplyHandler {
    public:
+    virtual ApplyType Type() const = 0;
+
     virtual seastar::future<Status<>> Apply(Buffer reqid, uint64_t id,
                                             Buffer ctx, Buffer data) = 0;
     virtual seastar::future<Status<>> Reset() = 0;
@@ -119,7 +121,7 @@ class Storage {
     explicit Storage(std::string_view db_path);
     static seastar::future<Status<StoragePtr>> Create(std::string_view db_path);
 
-    bool RegisterApplyHandler(ApplyType type, ApplyHandler* handler);
+    bool RegisterApplyHandler(ApplyHandler* handler);
 
     seastar::future<Status<>> Start(RaftServerOption opt,
                                     std::vector<RaftNode> raft_nodes);

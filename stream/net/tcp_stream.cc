@@ -11,13 +11,17 @@ namespace net {
 static constexpr uint32_t kInitialWnd = 262144;
 
 TcpStream::TcpStream(uint32_t id, uint8_t ver, uint32_t frame_size,
-                     TcpSessionPtr sess)
-    : id_(id), ver_(ver), frame_size_(frame_size), sess_(sess) {
+                     TcpSession *sess)
+    : shard_(seastar::this_shard_id()),
+      id_(id),
+      ver_(ver),
+      frame_size_(frame_size),
+      sess_(sess) {
     remote_wnd_ = std::max(kInitialWnd, frame_size_ * 8);
 }
 
 StreamPtr TcpStream::make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
-                                 TcpSessionPtr sess) {
+                                 TcpSession *sess) {
     seastar::shared_ptr<TcpStream> stream =
         seastar::make_shared<TcpStream>(id, ver, frame_size, sess);
     return seastar::dynamic_pointer_cast<Stream, TcpStream>(stream);
@@ -127,52 +131,58 @@ seastar::future<Status<>> TcpStream::SendWindowUpdate(uint32_t consumed) {
 }
 
 seastar::future<Status<>> TcpStream::WriteFrame(std::vector<iovec> iov) {
-    Status<> s;
+    return seastar::smp::submit_to(
+        shard_,
+        [this, iov = std::move(iov)]() mutable -> seastar::future<Status<>> {
+            Status<> s;
 
-    if (gate_.is_closed() || has_fin_) {
-        s.Set(EPIPE);
-        co_return s;
-    }
-    seastar::gate::holder holder(gate_);
+            if (gate_.is_closed() || has_fin_) {
+                s.Set(EPIPE);
+                co_return s;
+            }
+            seastar::gate::holder holder(gate_);
 
-    if (iov.size() >= IOV_MAX) {
-        s.Set(EMSGSIZE);
-        co_return s;
-    }
+            if (iov.size() >= IOV_MAX) {
+                s.Set(EMSGSIZE);
+                co_return s;
+            }
 
-    seastar::net::packet packet;
-    for (int i = 0; i < iov.size(); ++i) {
-        seastar::net::packet p = seastar::net::packet::from_static_data(
-            reinterpret_cast<const char *>(iov[i].iov_base), iov[i].iov_len);
-        packet.append(std::move(p));
-    }
-    if (packet.len() > frame_size_) {
-        s.Set(EMSGSIZE);
-        co_return s;
-    } else if (packet.len() == 0) {
-        co_return s;
-    }
+            seastar::net::packet packet;
+            for (int i = 0; i < iov.size(); ++i) {
+                seastar::net::packet p = seastar::net::packet::from_static_data(
+                    reinterpret_cast<const char *>(iov[i].iov_base),
+                    iov[i].iov_len);
+                packet.append(std::move(p));
+            }
+            if (packet.len() > frame_size_) {
+                s.Set(EMSGSIZE);
+                co_return s;
+            } else if (packet.len() == 0) {
+                co_return s;
+            }
 
-    int32_t inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
-    int32_t win = static_cast<int32_t>(remote_wnd_) - inflight;
-    while (inflight < 0 || win <= 0) {
-        co_await wnd_cv_.wait();
-        if (gate_.is_closed() || has_fin_) {
-            s.Set(EPIPE);
+            int32_t inflight =
+                static_cast<int32_t>(sent_bytes_ - remote_consumed_);
+            int32_t win = static_cast<int32_t>(remote_wnd_) - inflight;
+            while (inflight < 0 || win <= 0) {
+                co_await wnd_cv_.wait();
+                if (gate_.is_closed() || has_fin_) {
+                    s.Set(EPIPE);
+                    co_return s;
+                }
+                inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
+                win = static_cast<int32_t>(remote_wnd_) - inflight;
+            }
+            sent_bytes_ += packet.len();
+            Frame frame;
+            frame.ver = ver_;
+            frame.cmd = CmdType::PSH;
+            frame.sid = id_;
+            frame.packet = std::move(packet);
+            s = co_await sess_->WriteFrameInternal(std::move(frame),
+                                                   TcpSession::ClassID::DATA);
             co_return s;
-        }
-        inflight = static_cast<int32_t>(sent_bytes_ - remote_consumed_);
-        win = static_cast<int32_t>(remote_wnd_) - inflight;
-    }
-    sent_bytes_ += packet.len();
-    Frame frame;
-    frame.ver = ver_;
-    frame.cmd = CmdType::PSH;
-    frame.sid = id_;
-    frame.packet = std::move(packet);
-    s = co_await sess_->WriteFrameInternal(std::move(frame),
-                                           TcpSession::ClassID::DATA);
-    co_return s;
+        });
 }
 
 seastar::future<Status<>> TcpStream::WriteFrame(const char *b, size_t n) {
@@ -219,24 +229,26 @@ std::string TcpStream::LocalAddress() const { return sess_->LocalAddress(); }
 std::string TcpStream::RemoteAddress() const { return sess_->RemoteAddress(); }
 
 seastar::future<> TcpStream::Close() {
-    if (!gate_.is_closed()) {
-        auto fu = gate_.close();
-        r_cv_.signal();
-        wnd_cv_.broadcast();
-        Frame frame;
-        frame.ver = ver_;
-        frame.cmd = CmdType::FIN;
-        frame.sid = id_;
-        co_await sess_->WriteFrameInternal(std::move(frame),
-                                           TcpSession::ClassID::CTRL);
-        if (buffer_size_ > 0) {
-            sess_->ReturnTokens(buffer_size_);
-            buffer_size_ = 0;
+    return seastar::smp::submit(shard_, [this]() -> seastar::future<> {
+        if (!gate_.is_closed()) {
+            auto fu = gate_.close();
+            r_cv_.signal();
+            wnd_cv_.broadcast();
+            Frame frame;
+            frame.ver = ver_;
+            frame.cmd = CmdType::FIN;
+            frame.sid = id_;
+            co_await sess_->WriteFrameInternal(std::move(frame),
+                                               TcpSession::ClassID::CTRL);
+            if (buffer_size_ > 0) {
+                sess_->ReturnTokens(buffer_size_);
+                buffer_size_ = 0;
+            }
+            sess_->streams_.erase(id_);
+            co_await std::move(fu);
         }
-        sess_->streams_.erase(id_);
-        co_await std::move(fu);
-    }
-    co_return;
+        co_return;
+    });
 }
 
 }  // namespace net

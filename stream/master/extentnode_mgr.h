@@ -73,6 +73,8 @@ class ExtentnodeMgr : public ApplyHandler {
     static seastar::future<Status<ExtentnodeMgrPtr>> Create(
         Storage* store, IDGenerator* id_gen);
 
+    ApplyType Type() const override { return type_; }
+
     seastar::future<Status<>> Apply(Buffer reqid, uint64_t id, Buffer ctx,
                                     Buffer data) override;
     seastar::future<Status<>> Reset() override;

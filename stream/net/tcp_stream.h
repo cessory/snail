@@ -18,16 +18,15 @@ namespace snail {
 namespace net {
 
 class TcpStream;
-class TcpSession;
 
-using TcpSessionPtr = seastar::shared_ptr<TcpSession>;
 using TcpStreamPtr = seastar::shared_ptr<TcpStream>;
 
 class TcpStream : public Stream {
+    unsigned shard_;
     uint32_t id_;
     uint8_t ver_;
     uint32_t frame_size_;
-    TcpSessionPtr sess_;
+    TcpSession* sess_;
     std::queue<seastar::temporary_buffer<char>> buffers_;
     size_t buffer_size_ = 0;
     seastar::condition_variable r_cv_;
@@ -60,12 +59,12 @@ class TcpStream : public Stream {
 
    public:
     explicit TcpStream(uint32_t id, uint8_t ver, uint32_t frame_size,
-                       TcpSessionPtr sess);
+                       TcpSession* sess);
 
     virtual ~TcpStream() { sess_ = nullptr; }
 
     static StreamPtr make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
-                                 TcpSessionPtr sess);
+                                 TcpSession* sess);
 
     uint32_t ID() const { return id_; }
 
@@ -76,7 +75,7 @@ class TcpStream : public Stream {
     seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(
         int timeout = -1);
 
-    seastar::future<Status<>> WriteFrame(const char *b, size_t n);
+    seastar::future<Status<>> WriteFrame(const char* b, size_t n);
 
     seastar::future<Status<>> WriteFrame(std::vector<iovec> iov);
 

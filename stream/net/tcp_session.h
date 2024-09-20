@@ -20,6 +20,9 @@
 namespace snail {
 namespace net {
 
+class TcpSession;
+using TcpSessionPtr = seastar::shared_ptr<TcpSession>;
+
 class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
                    public Session {
     Option opt_;

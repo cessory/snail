@@ -310,7 +310,8 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
     co_return s;
 }
 
-bool Storage::RegisterApplyHandler(ApplyType type, ApplyHandler* handler) {
+bool Storage::RegisterApplyHandler(ApplyHandler* handler) {
+    auto type = handler->Type();
     if (sm_->apply_handler_vec_[(int)type]) {
         return false;
     }

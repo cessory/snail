@@ -9,7 +9,7 @@
 namespace snail {
 namespace stream {
 
-Server::Server(const std::string& host, uint16_t port, ServicePtr service)
+Server::Server(const std::string& host, uint16_t port, Service* service)
     : host_(host), port_(port), service_(service) {}
 
 seastar::future<> Server::HandleSession(net::SessionPtr sess) {
@@ -109,7 +109,6 @@ seastar::future<> Server::Close() {
         fu_vec.clear();
         sess_vec.clear();
     }
-    // TODO close another source
     co_return;
 }
 
