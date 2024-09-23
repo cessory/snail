@@ -267,7 +267,7 @@ Storage::StatemachineImpl::StatemachineImpl(std::string_view db_path)
 }
 
 Storage::Storage(std::string_view db_path) : shard_(seastar::this_shard_id()) {
-    sm_ = seastar::make_shared<StatemachineImpl>(std::move(db_path));
+    impl_ = seastar::make_shared<StatemachineImpl>(std::move(db_path));
 }
 
 seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
@@ -277,7 +277,7 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
     seastar::shared_ptr<Storage> store_ptr =
         seastar::make_shared<Storage>(std::move(db_path));
     auto st =
-        co_await store_ptr->sm_->worker_thread_.Submit<Status<rocksdb::DB*>>(
+        co_await store_ptr->impl_->worker_thread_.Submit<Status<rocksdb::DB*>>(
             [path]() -> Status<rocksdb::DB*> {
                 Status<rocksdb::DB*> s;
                 rocksdb::DB* db = nullptr;
@@ -299,8 +299,8 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
         co_return s;
     }
     std::unique_ptr<rocksdb::DB> db_ptr(st.Value());
-    store_ptr->sm_->db_ = std::move(db_ptr);
-    auto st2 = co_await store_ptr->sm_->LoadRaftConfig();
+    store_ptr->impl_->db_ = std::move(db_ptr);
+    auto st2 = co_await store_ptr->impl_->LoadRaftConfig();
     if (!st2) {
         LOG_ERROR("load data from db error: {}", st2);
         s.Set(st2.Code(), st2.Reason());
@@ -312,11 +312,11 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
 
 bool Storage::RegisterApplyHandler(ApplyHandler* handler) {
     auto type = handler->Type();
-    if (sm_->apply_handler_vec_[(int)type]) {
+    if (impl_->apply_handler_vec_[(int)type]) {
         return false;
     }
 
-    sm_->apply_handler_vec_[(int)type] = handler;
+    impl_->apply_handler_vec_[(int)type] = handler;
     return true;
 }
 
@@ -419,9 +419,8 @@ seastar::future<Status<>> Storage::StatemachineImpl::Apply(
     seastar::gate::holder holder(gate_);
     std::vector<seastar::future<Status<>>> fu_vec;
     for (int i = 0; i < datas.size(); i++) {
-        Buffer b = std::move(datas[i]);
         ApplyEntry entry;
-        if (!entry.Unmarshal(b)) {
+        if (!entry.Unmarshal(datas[i])) {
             s.Set(EINVAL);
             co_return s;
         }
@@ -429,7 +428,8 @@ seastar::future<Status<>> Storage::StatemachineImpl::Apply(
 
         if (apply_handler_vec_[type]) {
             auto fu = apply_handler_vec_[type]->Apply(
-                std::move(reqid), id, std::move(ctx), std::move(body));
+                std::move(entry.reqid), entry.id, std::move(entry.ctx),
+                std::move(entry.body));
             fu_vec.emplace_back(std::move(fu));
         }
     }
@@ -690,8 +690,8 @@ seastar::future<Status<>> Storage::StatemachineImpl::Put(Buffer key, Buffer val,
             wo.sync = sync;
             wo.disableWAL = true;
 
-            auto st = sm_->db_->Put(wo, rocksdb::Slice(key.get(), key.size()),
-                                    rocksdb::Slice(val.get(), val.size()));
+            auto st = db_->Put(wo, rocksdb::Slice(key.get(), key.size()),
+                               rocksdb::Slice(val.get(), val.size()));
             if (!st.ok()) {
                 s.Set(ErrCode::ErrUnExpect, st.ToString());
             }
@@ -839,42 +839,44 @@ seastar::future<> Storage::StatemachineImpl::ReleaseIterator(
         co_return;
     }
     seastar::gate::holder holder(gate_);
-    co_await worker_thread_.Submit<rocksdb::Iterator*>(
-        [this, iter] { delete iter; });
+    co_await worker_thread_.Submit<Status<>>([this, iter]() -> Status<> {
+        delete iter;
+        return Status<>();
+    });
     co_return;
 }
 
 seastar::future<Status<std::vector<std::pair<std::string, std::string>>>>
 Storage::StatemachineImpl::Range(rocksdb::Iterator* iter, size_t n) {
-    Status<> s;
+    Status<std::vector<std::pair<std::string, std::string>>> s;
     if (gate_.is_closed()) {
         s.Set(EPIPE);
         co_return s;
     }
     seastar::gate::holder holder(gate_);
 
-    s = co_await worker_thread_.Submit<
-        Status<std::vector<std::pair<std::string, std::string>>>>(
-        [this, iter,
-         n]() -> Status<std::vector<std::pair<std::string, std::string>>> {
-            Status<std::vector<std::pair<std::string, std::string>>> s;
-            std::vector<std::pair<std::string, std::string>> res;
-            for (size_t i = 0; iter->Valid() && i < n; n++) {
-                auto key = iter->key().ToString();
-                auto value = iter->value().ToString();
-                std::pair<std::string, std::string> p(std::move(key),
-                                                      std::move(val));
-                res.emplace_back(std::move(p));
-                iter->Next();
-            }
-            auto st = iter->status();
-            if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
-            } else {
-                s.SetValue(std::move(res));
-            }
-            return s;
-        });
+    s = co_await worker_thread_
+            .Submit<Status<std::vector<std::pair<std::string, std::string>>>>(
+                [this, iter, n]() mutable
+                -> Status<std::vector<std::pair<std::string, std::string>>> {
+                    Status<std::vector<std::pair<std::string, std::string>>> st;
+                    std::vector<std::pair<std::string, std::string>> res;
+                    for (size_t i = 0; iter->Valid() && i < n; i++) {
+                        auto key = iter->key().ToString();
+                        auto val = iter->value().ToString();
+                        std::pair<std::string, std::string> p(std::move(key),
+                                                              std::move(val));
+                        res.emplace_back(std::move(p));
+                        iter->Next();
+                    }
+                    auto st1 = iter->status();
+                    if (!st1.ok()) {
+                        st.Set(ErrCode::ErrUnExpect, st1.ToString());
+                    } else {
+                        st.SetValue(std::move(res));
+                    }
+                    return st;
+                });
     co_return s;
 }
 
@@ -1048,7 +1050,7 @@ seastar::future<Status<>> Storage::Range(
             break;
         }
 
-        std::vector<std::pair<std::string, std::string>> > results =
+        std::vector<std::pair<std::string, std::string>> results =
             std::move(st2.Value());
         for (int i = 0; i < results.size(); i++) {
             fn(results[i].first, results[i].second);
@@ -1066,9 +1068,10 @@ seastar::future<Status<>> Storage::Range(
 }
 
 seastar::future<> Storage::Close() {
-    return seastar::smp::submit_to(shard_, [this] -> seastar::future<> {
+    return seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
         return raft_->Close().then([this] { return impl_->Close(); });
     });
+}
 
 }  // namespace stream
-}  // namespace stream
+}  // namespace snail

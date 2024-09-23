@@ -1,6 +1,7 @@
 #include "tcp_stream.h"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/smp.hh>
 
 #include "byteorder.h"
 #include "tcp_session.h"
@@ -229,7 +230,7 @@ std::string TcpStream::LocalAddress() const { return sess_->LocalAddress(); }
 std::string TcpStream::RemoteAddress() const { return sess_->RemoteAddress(); }
 
 seastar::future<> TcpStream::Close() {
-    return seastar::smp::submit(shard_, [this]() -> seastar::future<> {
+    return seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
         if (!gate_.is_closed()) {
             auto fu = gate_.close();
             r_cv_.signal();

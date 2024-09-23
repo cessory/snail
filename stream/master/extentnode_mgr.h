@@ -58,7 +58,7 @@ class ExtentnodeMgr : public ApplyHandler {
                                            extent_node_ptr ptr);
     seastar::future<Status<>> ApplyRemoveNode(Buffer reqid, uint64_t id,
                                               extent_node_ptr ptr);
-    seastar::future<Status<>> ApplyUpdateNode(BUffer reqid, uint64_t id,
+    seastar::future<Status<>> ApplyUpdateNode(Buffer reqid, uint64_t id,
                                               extent_node_ptr ptr);
 
     seastar::future<Status<uint32_t>> Propose(

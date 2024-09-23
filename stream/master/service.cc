@@ -108,9 +108,9 @@ seastar::future<Status<>> Service::HandleAddNode(const AddNodeReq* req,
         co_return s;
     }
     std::chrono::milliseconds timeout{timeout_};
-    auto st = co_await extentnode_mgr_->AddNode(
-        raft_, reqid.share(), req->host(), req->port(), req->rack(), req->az(),
-        timeout);
+    auto st = co_await extentnode_mgr_->AddNode(reqid.share(), req->host(),
+                                                req->port(), req->rack(),
+                                                req->az(), timeout);
     resp.mutable_header()->set_code(static_cast<uint32_t>(st.Code()));
     if (!st) {
         resp.mutable_header()->set_reason(st.Reason());

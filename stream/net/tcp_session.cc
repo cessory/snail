@@ -64,7 +64,6 @@ SessionPtr TcpSession::make_session(
 }
 
 seastar::future<> TcpSession::RecvLoop() {
-    auto ptr = shared_from_this();
     char hdr[STREAM_HEADER_SIZE];
     char buffer[4096];
     bool break_loop = false;
@@ -138,7 +137,7 @@ seastar::future<> TcpSession::RecvLoop() {
                 auto it = streams_.find(f.sid);
                 if (it == streams_.end()) {
                     StreamPtr stream = TcpStream::make_stream(
-                        f.sid, f.ver, opt_.max_frame_size, shared_from_this());
+                        f.sid, f.ver, opt_.max_frame_size, this);
                     streams_[f.sid] =
                         seastar::dynamic_pointer_cast<TcpStream, Stream>(
                             stream);
@@ -255,7 +254,6 @@ seastar::future<> TcpSession::RecvLoop() {
 
 seastar::future<> TcpSession::SendLoop() {
     static uint32_t max_packet_num = IOV_MAX;
-    auto ptr = shared_from_this();
     seastar::timer<seastar::steady_clock_type> write_timer;
     write_timer.set_callback([this] {
         SetStatus(static_cast<ErrCode>(ETIMEDOUT));
@@ -412,8 +410,7 @@ seastar::future<Status<StreamPtr>> TcpSession::OpenStream() {
     }
     next_id_ = id;
 
-    auto stream =
-        TcpStream::make_stream(id, 2, opt_.max_frame_size, shared_from_this());
+    auto stream = TcpStream::make_stream(id, 2, opt_.max_frame_size, this);
     Frame frame;
     frame.ver = 2;
     frame.cmd = CmdType::SYN;

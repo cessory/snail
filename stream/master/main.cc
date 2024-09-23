@@ -4,6 +4,7 @@
 #include <seastar/core/app-template.hh>
 #include <seastar/core/thread.hh>
 
+#include "id_allocator.h"
 #include "id_generator.h"
 #include "proto/master.pb.h"
 #include "raft_server.h"
@@ -105,18 +106,20 @@ namespace bpo = boost::program_options;
 
 static seastar::future<> ServerStart(Config cfg) {
     auto st1 = co_await seastar::smp::submit_to(
-        2, [cfg]() -> Status<seastar::foreign_ptr<snail::stream::StoragePtr>> {
-            Status<seastar::foreign_ptr<snail::stream::StoragePtr>> s;
+        2,
+        [cfg]() -> seastar::future<snail::Status<
+                    seastar::foreign_ptr<snail::stream::StoragePtr>>> {
+            snail::Status<seastar::foreign_ptr<snail::stream::StoragePtr>> s;
             auto st = co_await snail::stream::Storage::Create(cfg.db_path);
             if (!st) {
                 LOG_ERROR("create storage error: {}", st);
                 s.Set(st.Code(), st.Reason());
-                return s;
+                co_return s;
             }
             seastar::foreign_ptr<snail::stream::StoragePtr> ptr =
                 seastar::make_foreign(std::move(st.Value()));
             s.SetValue(std::move(ptr));
-            return s;
+            co_return s;
         });
     if (!st1) {
         co_return;
@@ -124,13 +127,14 @@ static seastar::future<> ServerStart(Config cfg) {
     seastar::foreign_ptr<snail::stream::StoragePtr> foreign_store =
         std::move(st1.Value());
 
-    auto st2 = co_await CreateDiskIdAllocator(foreign_store.get());
+    auto st2 = co_await snail::stream::IdAllocator::CreateDiskIdAllocator(
+        foreign_store.get(), foreign_id_gen.get());
     if (!st2) {
         LOG_ERROR("create diskid allocator error: {}", st2);
         co_return;
     }
-    IdAllocatorPtr diskid_allocator = st2.Value();
-    ExtentnodeMgrPtr extentnode_mgr = st3.Value();
+    snail::stream::IdAllocatorPtr diskid_allocator = st2.Value();
+    snail::stream::ExtentnodeMgrPtr extentnode_mgr = st3.Value();
     // register apply handler
     foreign_store.get()->RegisterApplyHandler(diskid_allocator.get());
     foreign_store.get()->RegisterApplyHandler(extentnode_mgr.get());
@@ -150,7 +154,16 @@ static seastar::future<> ServerStart(Config cfg) {
         co_return;
     }
 
-    // TODO create tcp server
+    ServicePtr service = seastar::make_lw_shared<snail::stream::Service>(
+        diskid_allocator.get(), extentnode_mgr.get());
+    // create tcp server
+    snail::stream::ServerPtr tcp_server =
+        seastar::make_lw_shared<snail::stream::Server>(cfg.host, cfg.port,
+                                                       service.get());
+
+    co_await tcp_server->Start();
+    co_await tcp_server->Close();
+    co_return;
 }
 
 int main(int argc, char* argv[]) {
@@ -199,20 +212,6 @@ int main(int argc, char* argv[]) {
 
     char* args[1] = {argv[0]};
     return app.run(1, args, [&cfg]() -> seastar::future<> {
-        return seastar::async([&cfg] {
-            snail::stream::StoragePtr store = st.Value();
-            snail::stream::IDGeneratorPtr id_gen =
-                seastar::make_lw_shared<snail::stream::IDGenerator>(
-                    cfg.raft_cfg.id);
-
-            for (;;) {
-                auto st2 = store->ReadIndex().get0();
-                if (st2) {
-                    break;
-                }
-            }
-
-            // start tcp server TODO
-        });
+        return seastar::async([&cfg] { StartServer(cfg).get(); });
     });
 }

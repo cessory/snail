@@ -23,8 +23,7 @@ namespace net {
 class TcpSession;
 using TcpSessionPtr = seastar::shared_ptr<TcpSession>;
 
-class TcpSession : public seastar::enable_shared_from_this<TcpSession>,
-                   public Session {
+class TcpSession : public Session {
     Option opt_;
     uint64_t sess_id_;
     uint32_t max_receive_buffer_;

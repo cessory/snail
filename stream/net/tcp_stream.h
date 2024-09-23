@@ -18,6 +18,7 @@ namespace snail {
 namespace net {
 
 class TcpStream;
+class TcpSession;
 
 using TcpStreamPtr = seastar::shared_ptr<TcpStream>;
 
