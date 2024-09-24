@@ -16,6 +16,13 @@ static seastar::future<Status<>> SendResp(
     co_return s;
 }
 
+Service::Service(uint32_t cluster_id, uint32_t timeout,
+                 IdAllocator* diskid_allocator, ExtentnodeMgr* extentnode_mgr)
+    : cluster_id_(cluster_id),
+      timeout_(timeout),
+      diskid_alloctor_(diskid_allocator),
+      extentnode_mgr_(extentnode_mgr) {}
+
 seastar::future<Status<>> Service::HandleMessage(net::Stream* stream,
                                                  Buffer b) {
     Status<> s;

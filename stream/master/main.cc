@@ -4,10 +4,12 @@
 #include <seastar/core/app-template.hh>
 #include <seastar/core/thread.hh>
 
+#include "extentnode_mgr.h"
 #include "id_allocator.h"
 #include "id_generator.h"
 #include "proto/master.pb.h"
 #include "raft_server.h"
+#include "server.h"
 #include "storage.h"
 #include "util/logger.h"
 
@@ -124,9 +126,9 @@ static seastar::future<> ServerStart(Config cfg) {
     if (!st1) {
         co_return;
     }
-    seastar::foreign_ptr<snail::stream::Storage> foreign_store =
+    seastar::foreign_ptr<snail::stream::StoragePtr> foreign_store =
         std::move(st1.Value());
-    seastar::foreign_ptr<snail::stream::IDGenerator> foreign_id_gen =
+    seastar::foreign_ptr<snail::stream::IDGeneratorPtr> foreign_id_gen =
         seastar::make_foreign(
             seastar::make_shared<snail::stream::IDGenerator>(cfg.raft_cfg.id));
 
@@ -156,23 +158,29 @@ static seastar::future<> ServerStart(Config cfg) {
     opt.election_tick = cfg.raft_cfg.election_tick;
     opt.wal_dir = cfg.raft_cfg.raft_wal_path;
 
-    auto st3 =
+    auto st4 =
         co_await foreign_store.get()->Start(opt, cfg.raft_cfg.raft_nodes);
-    if (!st3) {
-        LOG_ERROR("create raft server error: {}", st3);
+    if (!st4) {
+        LOG_ERROR("create raft server error: {}", st4);
         co_await foreign_store.get()->Close();
         co_return;
     }
 
-    ServicePtr service = seastar::make_lw_shared<snail::stream::Service>(
-        diskid_allocator.get(), extentnode_mgr.get());
-    // create tcp server
-    snail::stream::ServerPtr tcp_server =
-        seastar::make_lw_shared<snail::stream::Server>(cfg.host, cfg.port,
-                                                       service.get());
+    co_await seastar::smp::submit_to(
+        1,
+        [cfg, diskid_allocator = diskid_allocator.get(),
+         extentnode_mgr = extentnode_mgr.get()]() -> seastar::future<> {
+            snail::stream::ServicePtr service =
+                seastar::make_lw_shared<snail::stream::Service>(
+                    diskid_allocator, extentnode_mgr);
+            // create tcp server
+            snail::stream::ServerPtr tcp_server =
+                seastar::make_lw_shared<snail::stream::Server>(
+                    cfg.host, cfg.port, service.get());
 
-    co_await tcp_server->Start();
-    co_await tcp_server->Close();
+            co_await tcp_server->Start();
+            co_await tcp_server->Close();
+        });
     co_return;
 }
 
@@ -222,6 +230,6 @@ int main(int argc, char* argv[]) {
 
     char* args[1] = {argv[0]};
     return app.run(1, args, [&cfg]() -> seastar::future<> {
-        return seastar::async([&cfg] { StartServer(cfg).get(); });
+        return seastar::async([&cfg] { ServerStart(cfg).get(); });
     });
 }

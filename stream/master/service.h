@@ -6,13 +6,14 @@ namespace snail {
 namespace stream {
 
 class Service {
-    uint32_t timeout_;  // request timeout(ms)
     uint32_t cluster_id_;
+    uint32_t timeout_;  // request timeout(ms)
     IdAllocator* diskid_alloctor_;
     ExtentnodeMgr* extentnode_mgr_;
 
    public:
-    explicit Service(IdAllocator* diskid_allocator,
+    explicit Service(uint32_t cluster_id, uint32_t timeout,
+                     IdAllocator* diskid_allocator,
                      ExtentnodeMgr* extentnode_mgr);
 
     seastar::future<Status<>> HandleMessage(net::Stream* stream, Buffer b);
