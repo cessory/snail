@@ -124,8 +124,11 @@ static seastar::future<> ServerStart(Config cfg) {
     if (!st1) {
         co_return;
     }
-    seastar::foreign_ptr<snail::stream::StoragePtr> foreign_store =
+    seastar::foreign_ptr<snail::stream::Storage> foreign_store =
         std::move(st1.Value());
+    seastar::foreign_ptr<snail::stream::IDGenerator> foreign_id_gen =
+        seastar::make_foreign(
+            seastar::make_shared<snail::stream::IDGenerator>(cfg.raft_cfg.id));
 
     auto st2 = co_await snail::stream::IdAllocator::CreateDiskIdAllocator(
         foreign_store.get(), foreign_id_gen.get());
@@ -134,6 +137,13 @@ static seastar::future<> ServerStart(Config cfg) {
         co_return;
     }
     snail::stream::IdAllocatorPtr diskid_allocator = st2.Value();
+
+    auto st3 = co_await snail::stream::ExtentnodeMgr::Create(
+        foreign_store.get(), foreign_id_gen.get());
+    if (!st3) {
+        LOG_ERROR("create extentnode mgr error: {}", st3);
+        co_return;
+    }
     snail::stream::ExtentnodeMgrPtr extentnode_mgr = st3.Value();
     // register apply handler
     foreign_store.get()->RegisterApplyHandler(diskid_allocator.get());
