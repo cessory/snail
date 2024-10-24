@@ -62,12 +62,16 @@ seastar::future<> Server::Start() {
     }
     seastar::gate::holder holder(gate_);
     try {
-        fd_ = seastar::engine().posix_listen(sa);
+        seastar::listen_options opts;
+        opts.reuse_address = true;
+        opts.set_fixed_cpu(seastar::this_shard_id());
+        fd_ = seastar::engine().posix_listen(sa, opts);
     } catch (std::exception& e) {
         LOG_ERROR("listen error: {}", e.what());
         co_return;
     }
 
+    LOG_INFO("listen succeed on host: {} port: {}", host_, port_);
     while (!gate_.is_closed()) {
         try {
             auto ar = co_await fd_.accept();

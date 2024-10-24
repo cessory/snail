@@ -159,13 +159,17 @@ class SmSnapshotImpl : public SmSnapshot {
     uint64_t index_;
     seastar::gate* external_gate_;
     seastar::gate gate_;
+    uint32_t& pending_snapshot_;
 
     friend class Storage;
 
    public:
     SmSnapshotImpl(const seastar::sstring& name, uint64_t index,
-                   seastar::gate* gate)
-        : name_(name), index_(index), external_gate_(gate) {
+                   seastar::gate* gate, uint32_t& pending_snapshot)
+        : name_(name),
+          index_(index),
+          external_gate_(gate),
+          pending_snapshot_(pending_snapshot) {
         gate->enter();
     }
 
@@ -239,6 +243,9 @@ class SmSnapshotImpl : public SmSnapshot {
             delete iter_;
             iter_ = nullptr;
         }
+        if (pending_snapshot_ > 0) {
+            pending_snapshot_--;
+        }
 
         if (snapshot_) {
             co_await worker_thread_->Submit<Status<>>([this]() -> Status<> {
@@ -256,26 +263,35 @@ class SmSnapshotImpl : public SmSnapshot {
 
 using SmSnapshotImplPtr = seastar::shared_ptr<SmSnapshotImpl>;
 
-Storage::StatemachineImpl::StatemachineImpl(std::string_view db_path)
+Storage::StatemachineImpl::StatemachineImpl(std::string_view db_path,
+                                            uint64_t retain_wal_entries)
     : db_path_(db_path),
+      worker_thread_("storage"),
+      prev_applied_(0),
       applied_(0),
+      retain_wal_entries_(retain_wal_entries),
       snapshot_seq_(time(0)),
       lead_(0),
+      pending_snapshot_(0),
       applied_key_(8, 0) {
     applied_key_[0] = static_cast<char>(ApplyType::Raft);
-    memcpy(&applied_key_[1], "applied", 7);
+    memcpy(applied_key_.data() + 1, "applied", 7);
 }
 
-Storage::Storage(std::string_view db_path) : shard_(seastar::this_shard_id()) {
-    impl_ = seastar::make_shared<StatemachineImpl>(std::move(db_path));
+Storage::Storage(std::string_view db_path, uint64_t retain_wal_entries)
+    : shard_(seastar::this_shard_id()) {
+    impl_ = seastar::make_shared<StatemachineImpl>(std::move(db_path),
+                                                   retain_wal_entries);
 }
 
-seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
+seastar::future<Status<StoragePtr>> Storage::Create(
+    std::string_view db_path, RaftServerOption opt, uint64_t retain_wal_entries,
+    std::vector<RaftNode> cfg_nodes) {
     Status<StoragePtr> s;
 
     std::string path(db_path);
     seastar::shared_ptr<Storage> store_ptr =
-        seastar::make_shared<Storage>(std::move(db_path));
+        seastar::make_shared<Storage>(std::move(db_path), retain_wal_entries);
     auto st =
         co_await store_ptr->impl_->worker_thread_.Submit<Status<rocksdb::DB*>>(
             [path]() -> Status<rocksdb::DB*> {
@@ -306,6 +322,24 @@ seastar::future<Status<StoragePtr>> Storage::Create(std::string_view db_path) {
         s.Set(st2.Code(), st2.Reason());
         co_return s;
     }
+    auto raft_nodes = store_ptr->impl_->GetRaftNodes();
+    if (raft_nodes.empty()) {
+        raft_nodes = cfg_nodes;
+    }
+    if (raft_nodes.empty()) {
+        s.Set(ErrCode::ErrUnExpect, "raft node is empty");
+        co_return s;
+    }
+    auto st3 = co_await snail::stream::RaftServer::Create(
+        opt, store_ptr->impl_->applied_, std::move(raft_nodes),
+        seastar::dynamic_pointer_cast<Statemachine, StatemachineImpl>(
+            store_ptr->impl_));
+    if (!st3) {
+        s.Set(st3.Code(), st3.Reason());
+        co_return s;
+    }
+    store_ptr->raft_ = st3.Value();
+    store_ptr->impl_->raft_ = store_ptr->raft_;
     s.SetValue(store_ptr);
     co_return s;
 }
@@ -320,32 +354,34 @@ bool Storage::RegisterApplyHandler(ApplyHandler* handler) {
     return true;
 }
 
-seastar::future<Status<>> Storage::Start(RaftServerOption opt,
-                                         std::vector<RaftNode> cfg_nodes) {
-    return seastar::smp::submit_to(
-        shard_,
-        seastar::coroutine::lambda([this, opt,
-                                    cfg_nodes]() -> seastar::future<Status<>> {
-            Status<> s;
-            auto raft_nodes = impl_->GetRaftNodes();
-            if (raft_nodes.empty()) {
-                raft_nodes = cfg_nodes;
-            }
-            if (raft_nodes.empty()) {
-                s.Set(ErrCode::ErrUnExpect, "raft node is empty");
-                co_return s;
-            }
-            auto st = co_await snail::stream::RaftServer::Create(
-                opt, impl_->applied_, std::move(raft_nodes),
-                seastar::dynamic_pointer_cast<Statemachine, StatemachineImpl>(
-                    impl_));
-            if (!st) {
-                s.Set(st.Code(), st.Reason());
-                co_return s;
-            }
-            raft_ = st.Value();
-            co_return s;
+seastar::future<> Storage::Start() {
+    co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda([this]() -> seastar::future<> {
+            co_await raft_->Start();
+            co_return;
         }));
+    co_return;
+}
+
+seastar::future<> Storage::WaitLeaderChange() {
+    return seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
+        return impl_->WaitLeaderChange();
+    });
+}
+
+seastar::future<> Storage::Reload() {
+    for (;;) {
+        auto s = co_await ReadIndex();
+        if (!s) {
+            if (s.Code() == ErrCode(EPIPE) ||
+                s.Code() == ErrCode::ErrRaftAbort) {
+                break;
+            }
+            continue;
+        }
+        break;
+    }
+    co_return;
 }
 
 seastar::future<Status<>> Storage::StatemachineImpl::LoadRaftConfig() {
@@ -373,11 +409,15 @@ seastar::future<Status<>> Storage::StatemachineImpl::LoadRaftConfig() {
 
             if (0 == key.compare(applied_key_)) {
                 applied_ = net::BigEndian::Uint64(value.data());
+                prev_applied_ = applied_;
                 continue;
             }
 
             RaftNode node;
-            node.ParseFromArray(value.data(), value.size());
+            if (!node.ParseFromArray(value.data(), value.size())) {
+                s.Set(ErrCode::ErrUnExpect, "invalid raft node");
+                break;
+            }
             if (node.id() == 0) {
                 continue;
             }
@@ -419,6 +459,9 @@ seastar::future<Status<>> Storage::StatemachineImpl::Apply(
     seastar::gate::holder holder(gate_);
     std::vector<seastar::future<Status<>>> fu_vec;
     for (int i = 0; i < datas.size(); i++) {
+        if (datas[i].empty()) {
+            continue;
+        }
         ApplyEntry entry;
         if (!entry.Unmarshal(datas[i])) {
             s.Set(EINVAL);
@@ -443,7 +486,20 @@ seastar::future<Status<>> Storage::StatemachineImpl::Apply(
     }
 
     s = co_await SaveApplied(index, false);
+    if (!s) {
+        co_return s;
+    }
     applied_ = index;
+    if (applied_ - prev_applied_ >= retain_wal_entries_ &&
+        pending_snapshot_ == 0) {
+        s = co_await Flush();
+        if (s && prev_applied_ > 0) {
+            if (raft_) {
+                raft_->ReleaseWal(prev_applied_);
+            }
+            prev_applied_ = applied_;
+        }
+    }
     co_return s;
 }
 
@@ -511,8 +567,9 @@ Storage::StatemachineImpl::CreateSnapshot() {
 
     seastar::sstring name = seastar::internal::to_sstring<seastar::sstring>(
         (unsigned long)snapshot_seq_++);
-    SmSnapshotImplPtr snapshot =
-        seastar::make_shared<SmSnapshotImpl>(name, applied_, &gate_);
+    pending_snapshot_++;
+    SmSnapshotImplPtr snapshot = seastar::make_shared<SmSnapshotImpl>(
+        name, applied_, &gate_, pending_snapshot_);
     snapshot->db_ = db_.get();
     auto st = co_await worker_thread_.Submit<
         Status<std::tuple<const rocksdb::Snapshot*, rocksdb::Iterator*>>>(
@@ -673,6 +730,11 @@ seastar::future<Status<>> Storage::StatemachineImpl::ApplySnapshot(
 
 void Storage::StatemachineImpl::LeadChange(uint64_t node_id) {
     lead_ = node_id;
+    lead_change_cv_.broadcast();
+}
+
+seastar::future<> Storage::StatemachineImpl::WaitLeaderChange() {
+    return lead_change_cv_.wait();
 }
 
 seastar::future<Status<>> Storage::StatemachineImpl::Put(Buffer key, Buffer val,
@@ -741,6 +803,9 @@ seastar::future<Status<Buffer>> Storage::StatemachineImpl::Get(Buffer key) {
             auto st =
                 db_->Get(ro, rocksdb::Slice(key.get(), key.size()), &value);
             if (!st.ok()) {
+                if (st.IsNotFound()) {
+                    return std::move(s);
+                }
                 s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
@@ -832,6 +897,26 @@ Storage::StatemachineImpl::NewIterator(Buffer start, Buffer end,
     co_return s;
 }
 
+seastar::future<Status<>> Storage::StatemachineImpl::Flush() {
+    Status<> s;
+    if (gate_.is_closed()) {
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
+    s = co_await worker_thread_.Submit<Status<>>([this]() -> Status<> {
+        Status<> s;
+        rocksdb::FlushOptions opts;
+        opts.wait = true;
+        auto st = db_->Flush(opts);
+        if (!st.ok()) {
+            s.Set(ErrCode::ErrUnExpect, st.ToString());
+        }
+        return s;
+    });
+    co_return s;
+}
+
 seastar::future<> Storage::StatemachineImpl::ReleaseIterator(
     rocksdb::Iterator* iter) {
     if (gate_.is_closed()) {
@@ -893,6 +978,7 @@ seastar::future<> Storage::StatemachineImpl::Close() {
         co_return;
     }
 
+    lead_change_cv_.broken();
     co_await gate_.close();
     co_return;
 }
@@ -974,6 +1060,7 @@ seastar::future<Status<Buffer>> Storage::Get(Buffer key) {
                     }));
     if (!st) {
         s.Set(st.Code(), st.Reason());
+        LOG_ERROR("get error: {}", st);
         co_return s;
     }
     s.SetValue(foreign_buffer_copy(std::move(st.Value())));
@@ -1068,8 +1155,14 @@ seastar::future<Status<>> Storage::Range(
 }
 
 seastar::future<> Storage::Close() {
-    return seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
-        return raft_->Close().then([this] { return impl_->Close(); });
+    co_await seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
+        if (raft_) {
+            co_await raft_->Close();
+            raft_ = nullptr;
+        }
+        co_await impl_->Close();
+        impl_ = nullptr;
+        co_return;
     });
 }
 

@@ -58,5 +58,6 @@ add_subdirectory(extentnode)
 add_subdirectory(master)
 add_subdirectory(demos)
 add_subdirectory(raft)
+add_subdirectory(util)
 
 

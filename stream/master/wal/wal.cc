@@ -47,6 +47,9 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
+                if (st.IsNotFound()) {
+                    return s;
+                }
                 s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
@@ -83,6 +86,9 @@ seastar::future<Status<>> RaftWal::LoadSnapshot() {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
+                if (st.IsNotFound()) {
+                    return s;
+                }
                 s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
@@ -136,8 +142,10 @@ seastar::future<Status<>> RaftWal::LoadLastIndex() {
                 s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
-            std::string last_index = iter->key().ToString();
-            s.SetValue(std::move(last_index));
+            if (iter->Valid()) {
+                std::string last_index = iter->key().ToString();
+                s.SetValue(std::move(last_index));
+            }
             return std::move(s);
         });
     if (!st) {
@@ -367,6 +375,9 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
             std::string value;
             auto st = db->Get(ro, kSlice, &value);
             if (!st.ok()) {
+                if (st.IsNotFound()) {
+                    return s;
+                }
                 s.Set(ErrCode::ErrUnExpect, st.ToString());
                 return s;
             }
@@ -500,7 +511,7 @@ seastar::future<Status<>> RaftWal::ApplySnapshot(uint64_t index,
 }
 
 RaftWalFactory::RaftWalFactory(const std::string& path)
-    : worker_thread_(), path_(path) {}
+    : worker_thread_("wal"), path_(path) {}
 
 RaftWalFactory::~RaftWalFactory() {
     if (db_) {

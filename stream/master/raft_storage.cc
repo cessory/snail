@@ -127,6 +127,17 @@ void RaftStorage::RemoveRaftNode(uint64_t node_id) {
     raft_node_map_.erase(node_id);
 }
 
+RaftNode RaftStorage::GetRaftNode(uint64_t id) {
+    RaftNode node;
+    auto it = raft_node_map_.find(id);
+    if (it == raft_node_map_.end()) {
+        return node;
+    }
+
+    node = *(it->second);
+    return node;
+}
+
 void RaftStorage::UpdateRaftNodes(const std::vector<RaftNode>& nodes) {
     std::unordered_map<uint64_t, RaftNodePtr> node_map;
     for (int i = 0; i < nodes.size(); ++i) {

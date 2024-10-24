@@ -1542,6 +1542,7 @@ seastar::future<Status<>> Raft::Step(MessagePtr m) {
                 msg->reject = true;
                 Send(msg);
             }
+            break;
         }
         default: {
             s = co_await step_(m);

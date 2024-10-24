@@ -2,6 +2,8 @@
 
 #include <seastar/core/coroutine.hh>
 
+#include "util/logger.h"
+
 namespace snail {
 namespace raft {
 

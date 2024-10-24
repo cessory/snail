@@ -55,18 +55,23 @@ class ApplyHandler {
 
 class Storage {
     struct StatemachineImpl : public Statemachine {
-        StatemachineImpl(std::string_view db_path);
+        StatemachineImpl(std::string_view db_path, uint64_t retain_wal_entries);
 
         std::string db_path_;
         std::unique_ptr<rocksdb::DB> db_;
         AsyncThread worker_thread_;
+        uint64_t prev_applied_;
         uint64_t applied_;
+        uint64_t retain_wal_entries_;
         uint64_t snapshot_seq_;
         uint64_t lead_;
+        uint32_t pending_snapshot_;
         std::string applied_key_;
+        seastar::condition_variable lead_change_cv_;
         seastar::gate gate_;
         std::unordered_map<uint64_t, RaftNode> raft_nodes_;
         std::array<ApplyHandler*, (int)ApplyType::Max> apply_handler_vec_;
+        RaftServerPtr raft_;
 
         seastar::future<Status<>> Apply(std::vector<Buffer> datas,
                                         uint64_t index) override;
@@ -83,6 +88,8 @@ class Storage {
 
         void LeadChange(uint64_t node_id) override;
 
+        seastar::future<> WaitLeaderChange();
+
         seastar::future<Status<>> LoadRaftConfig();
 
         seastar::future<Status<>> SaveApplied(uint64_t index, bool sync);
@@ -98,6 +105,7 @@ class Storage {
 
         seastar::future<Status<>> DeleteRange(Buffer start, Buffer end,
                                               bool sync = false);
+        seastar::future<Status<>> Flush();
 
         seastar::future<Status<rocksdb::Iterator*>> NewIterator(
             Buffer start, Buffer end, bool fill_cache = false);
@@ -118,13 +126,24 @@ class Storage {
     RaftServerPtr raft_;
 
    public:
-    explicit Storage(std::string_view db_path);
-    static seastar::future<Status<StoragePtr>> Create(std::string_view db_path);
+    explicit Storage(std::string_view db_path, uint64_t retain_wal_entries);
+    static seastar::future<Status<StoragePtr>> Create(
+        std::string_view db_path, RaftServerOption opt,
+        uint64_t retain_wal_entries, std::vector<RaftNode> raft_nodes);
 
     bool RegisterApplyHandler(ApplyHandler* handler);
 
-    seastar::future<Status<>> Start(RaftServerOption opt,
-                                    std::vector<RaftNode> raft_nodes);
+    seastar::future<> Start();
+
+    seastar::future<> WaitLeaderChange();
+
+    seastar::future<> Reload();
+
+    bool HasLeader() { return impl_->lead_; }
+
+    uint64_t LeaderID() { return impl_->lead_; }
+
+    RaftNode GetRaftNode(uint64_t id) { return raft_->GetRaftNode(id); }
 
     seastar::future<Status<>> Propose(Buffer reqid, uint64_t id, ApplyType type,
                                       Buffer ctx, Buffer data);

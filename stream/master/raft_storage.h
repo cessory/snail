@@ -53,6 +53,8 @@ class RaftStorage : public raft::Storage {
 
     void RemoveRaftNode(uint64_t node_id);
 
+    RaftNode GetRaftNode(uint64_t id);
+
     void UpdateRaftNodes(const std::vector<RaftNode>& nodes);
 
     void SetApplied(uint64_t applied);

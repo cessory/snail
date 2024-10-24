@@ -65,7 +65,6 @@ class RaftServer {
 
     std::queue<ProposeEntry*> propose_pending_;
     std::queue<raft::ReadyPtr> apply_pending_;
-    std::queue<raft::ReadyPtr> apply_completed_;
     std::queue<raft::MessagePtr> recv_pending_;
     std::queue<raft::EntryPtr> conf_change_;
     std::optional<uint64_t> pending_release_wal_;
@@ -92,6 +91,8 @@ class RaftServer {
         const RaftServerOption opt, uint64_t applied,
         std::vector<RaftNode> nodes, StatemachinePtr sm);
 
+    seastar::future<> Start();
+
     seastar::future<Status<>> Propose(Buffer b);
 
     seastar::future<Status<>> AddRaftNode(uint64_t node_id,
@@ -100,6 +101,8 @@ class RaftServer {
                                           std::string host, uint16_t port);
 
     seastar::future<Status<>> RemoveRaftNode(uint64_t node_id);
+
+    RaftNode GetRaftNode(uint64_t id);
 
     void TransferLeader(uint64_t transferee);
 

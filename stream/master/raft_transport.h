@@ -21,6 +21,7 @@ class RaftSender {
         uint64_t node_id;
         std::string host;
         uint16_t port;
+        bool last_error_log;
         seastar::shared_mutex sess_mutex;
         net::SessionPtr sess;
         std::optional<net::StreamPtr> stream;

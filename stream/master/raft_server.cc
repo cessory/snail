@@ -94,9 +94,9 @@ seastar::future<> RaftServer::ApplyLoop() {
         while (!apply_pending_.empty()) {
             auto rd = apply_pending_.front();
             apply_pending_.pop();
-            auto entries = rd->GetEntries();
+            auto entries = rd->GetCommittedEntries();
             std::vector<Buffer> data_vec;
-            uint64_t index;
+            uint64_t index = 0;
 
             for (int i = 0; i < entries.size(); i++) {
                 // if entry index is smaller than applied, application should
@@ -106,9 +106,9 @@ seastar::future<> RaftServer::ApplyLoop() {
                 }
                 auto type = entries[i]->type();
                 if (type == raft::EntryType::EntryNormal) {
-                    index = entries[i]->index();
                     data_vec.emplace_back(
                         std::move(entries[i]->data().share()));
+                    index = entries[i]->index();
                 } else if (type == raft::EntryType::EntryConfChange) {
                     if (!data_vec.empty()) {
                         auto s =
@@ -133,8 +133,31 @@ seastar::future<> RaftServer::ApplyLoop() {
                     LOG_FATAL("apply raft entry error: {}", s);
                 }
             }
-            apply_completed_.push(rd);
-            cv_.signal();
+            if (index > 0) {
+                store_->SetApplied(index);
+                apply_waiter_.broadcast();
+            }
+
+            auto snap = rd->GetSnapshot();
+            if (snap) {
+                auto s = co_await store_->ApplySnapshot(
+                    snap->metadata().index(), snap->metadata().term());
+                if (!s) {
+                    LOG_FATAL("apply raft snapshot error: {}", s);
+                }
+                apply_waiter_.broadcast();
+                store_->SetConfState(snap->metadata().conf_state());
+                SnapshotMetaPayload payload;
+                payload.ParseFromArray(snap->data().get(), snap->data().size());
+                int n = payload.nodes_size();
+                std::vector<RaftNode> nodes;
+                for (int i = 0; i < n; ++i) {
+                    nodes.push_back(payload.nodes(i));
+                }
+                // update store and sender
+                store_->UpdateRaftNodes(nodes);
+                co_await sender_->UpdateRaftNodes(nodes);
+            }
             apply_sem_.signal();
         }
         co_await apply_cv_.wait();
@@ -213,11 +236,16 @@ seastar::future<> RaftServer::HandleReady(raft::ReadyPtr rd) {
         }
     }
     auto fu1 = sender_->Send(std::move(msgs));
-    auto fu2 = store_->Save(std::move(rd->GetEntries()), rd->GetHardState());
+    auto entries = rd->GetEntries();
+    auto fu2 = store_->Save(std::move(entries), rd->GetHardState());
     co_await apply_sem_.wait();
     apply_pending_.push(rd);
     apply_cv_.signal();
     co_await seastar::when_all_succeed(std::move(fu1), std::move(fu2));
+    auto s = co_await raft_node_->Advance(rd);
+    if (!s) {
+        LOG_FATAL("raft node advance error: {}", s);
+    }
     co_return;
 }
 
@@ -237,8 +265,8 @@ seastar::future<> RaftServer::Run() {
 
     while (!gate_.is_closed()) {
         if (!raft_node_->HasReady() && propose_pending_.empty() &&
-            apply_completed_.empty() && recv_pending_.empty() &&
-            conf_change_.empty() && !pending_release_wal_ && !tick_) {
+            recv_pending_.empty() && conf_change_.empty() &&
+            !pending_release_wal_ && !tick_) {
             co_await cv_.wait();
             continue;
         }
@@ -276,6 +304,7 @@ seastar::future<> RaftServer::Run() {
                 }
             }
             auto type = cc.type();
+            LOG_INFO("begin conf change......");
             switch (type) {
                 case raft::ConfChangeType::ConfChangeAddNode:
                 case raft::ConfChangeType::ConfChangeAddLearnerNode:
@@ -302,41 +331,6 @@ seastar::future<> RaftServer::Run() {
             auto s = co_await raft_node_->RawStep(msg);
             if (s.Code() == ErrCode::ErrRaftAbort) {
                 LOG_FATAL("recv step error: raft node has already abort");
-            }
-        }
-
-        while (!apply_completed_.empty()) {
-            auto rd = apply_completed_.front();
-            apply_completed_.pop();
-            auto entries = rd->GetEntries();
-            if (!entries.empty()) {
-                store_->SetApplied(entries.back()->index());
-                apply_waiter_.broadcast();
-            }
-
-            auto snap = rd->GetSnapshot();
-            if (snap) {
-                auto s = co_await store_->ApplySnapshot(
-                    snap->metadata().index(), snap->metadata().term());
-                if (!s) {
-                    LOG_FATAL("apply raft snapshot error: {}", s);
-                }
-                apply_waiter_.broadcast();
-                store_->SetConfState(snap->metadata().conf_state());
-                SnapshotMetaPayload payload;
-                payload.ParseFromArray(snap->data().get(), snap->data().size());
-                int n = payload.nodes_size();
-                std::vector<RaftNode> nodes;
-                for (int i = 0; i < n; ++i) {
-                    nodes.push_back(payload.nodes(i));
-                }
-                // update store and sender
-                store_->UpdateRaftNodes(nodes);
-                co_await sender_->UpdateRaftNodes(nodes);
-            }
-            auto s = co_await raft_node_->Advance(rd);
-            if (!s) {
-                LOG_FATAL("raft node advance error: {}", s);
             }
         }
 
@@ -463,11 +457,17 @@ seastar::future<Status<RaftServerPtr>> RaftServer::Create(
     }
     raft_ptr->store_ = store;
     raft_ptr->raft_node_ = std::move(st2.Value());
-    (void)raft_ptr->Run();
-    (void)raft_ptr->ApplyLoop();
-    (void)raft_ptr->receiver_->Start();
     s.SetValue(raft_ptr);
     co_return s;
+}
+
+seastar::future<> RaftServer::Start() {
+    auto f1 = Run();
+    auto f2 = ApplyLoop();
+    auto f3 = receiver_->Start();
+    co_await seastar::when_all_succeed(std::move(f1), std::move(f2),
+                                       std::move(f3));
+    co_return;
 }
 
 seastar::future<Status<>> RaftServer::Propose(Buffer b) {
@@ -557,6 +557,10 @@ seastar::future<Status<>> RaftServer::RemoveRaftNode(uint64_t node_id) {
     co_return s;
 }
 
+RaftNode RaftServer::GetRaftNode(uint64_t id) {
+    return store_->GetRaftNode(id);
+}
+
 void RaftServer::TransferLeader(uint64_t transferee) {
     if (raft_node_->HasAbort()) {
         return;
@@ -592,7 +596,7 @@ seastar::future<Status<uint64_t>> RaftServer::ReadIndex() {
             (node_id_ << 48 | ((++read_index_seq_) & (ULONG_MAX >> 16)));
         (*read_index_)->timer.set_callback([this] {
             Status<uint64_t> st;
-            st.Set(ETIMEDOUT);
+            st.Set(ETIME);
             (*read_index_)->pr.set_value(std::move(st));
             read_index_.reset();
         });
@@ -619,13 +623,13 @@ seastar::future<Status<uint64_t>> RaftServer::ReadIndex() {
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start);
         if (diff >= timeout) {
-            s.Set(ETIMEDOUT);
+            s.Set(ETIME);
             break;
         }
         try {
             co_await apply_waiter_.wait(timeout - diff);
         } catch (...) {
-            s.Set(ETIMEDOUT);
+            s.Set(ETIME);
             break;
         }
     }

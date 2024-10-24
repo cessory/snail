@@ -107,7 +107,7 @@ class ReceivedSnapshot : public SmSnapshot {
 
 RaftSender::Client::Client(uint64_t id, const std::string& raft_host,
                            uint16_t raft_port)
-    : node_id(id), host(raft_host), port(raft_port) {}
+    : node_id(id), host(raft_host), port(raft_port), last_error_log(false) {}
 
 seastar::future<Status<>> RaftSender::Client::Connect() {
     Status<> s;
@@ -134,18 +134,27 @@ seastar::future<Status<>> RaftSender::Client::Connect() {
         timer.cancel();
         auto conn = net::TcpConnection::make_connection(fd, sa);
         sess = net::TcpSession::make_session(opt, conn, true);
+        LOG_INFO("connect raft node(id={} host={} port={}) succeed", node_id,
+                 host, port);
+        last_error_log = false;
     } catch (std::system_error& e) {
         timer.cancel();
         s.Set(e.code().value(), e.what());
-        LOG_ERROR("connect raft node(id={} host={} port={}) error: {}", node_id,
-                  host, port, s);
+        if (!last_error_log) {
+            last_error_log = true;
+            LOG_ERROR("connect raft node(id={} host={} port={}) error: {}",
+                      node_id, host, port, s);
+        }
         stream.reset();
         co_return s;
     } catch (std::exception& e) {
         timer.cancel();
         s.Set(ErrCode::ErrUnExpect, e.what());
-        LOG_ERROR("connect raft node(id={} host={} port={}) error: {}", node_id,
-                  host, port, s);
+        if (!last_error_log) {
+            last_error_log = true;
+            LOG_ERROR("connect raft node(id={} host={} port={}) error: {}",
+                      node_id, host, port, s);
+        }
         stream.reset();
         co_return s;
     }
@@ -428,6 +437,7 @@ seastar::future<> RaftSender::Send(std::vector<raft::MessagePtr> msgs) {
             static_cast<char>(RpcMessageType::Normal);
         uint32_t crc = crc32_gzip_refl(0, (const unsigned char*)(buf.get() + 4),
                                        buf.size() - 4);
+        net::BigEndian::PutUint32(buf.get_write(), crc);
 
         auto iter = node_msgs.find(msgs[i]->to);
         if (iter == node_msgs.end()) {
@@ -694,7 +704,10 @@ seastar::future<> RaftReceiver::Start() {
     seastar::gate::holder holder(gate_);
     try {
         seastar::socket_address sa(seastar::ipv4_addr(host_, port_));
-        listen_fd_ = seastar::engine().posix_listen(sa);
+        seastar::listen_options opts;
+        opts.reuse_address = true;
+        opts.set_fixed_cpu(seastar::this_shard_id());
+        listen_fd_ = seastar::engine().posix_listen(sa, opts);
     } catch (std::exception& e) {
         LOG_ERROR("start raft receiver ({}:{}) error: {}", host_, port_,
                   e.what());

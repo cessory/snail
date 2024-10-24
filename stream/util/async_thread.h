@@ -12,6 +12,7 @@
 #include "util/status.h"
 
 namespace snail {
+
 class AsyncThread {
     class WorkQueue {
         struct WorkItem;
@@ -61,18 +62,34 @@ class AsyncThread {
         friend class AsyncThread;
     };
 
+    class Poller : public seastar::pollfn {
+        AsyncThread &async_thread_;
+
+       public:
+        Poller(AsyncThread &th);
+
+        virtual bool poll() final override;
+        virtual bool pure_poll() override final;
+        virtual bool try_enter_interrupt_mode() override;
+        virtual void exit_interrupt_mode() override final;
+    };
+
     seastar::reactor &r_;
     unsigned shard_id_;
     AsyncThread::WorkQueue worker_queue_;
     seastar::posix_thread worker_thread_;
     seastar::reactor::poller poller_;
     std::atomic<bool> stopped_ = {false};
+    std::atomic<bool> main_thread_idle_ = {false};
 
-    void work();
+    void work(std::string name);
     bool poll();
 
+    void enter_interrupt_mode();
+    void exit_interrupt_mode();
+
    public:
-    AsyncThread();
+    AsyncThread(std::string name);
     ~AsyncThread();
 
     template <typename T>
