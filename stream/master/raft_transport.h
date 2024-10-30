@@ -8,6 +8,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/util/noncopyable_function.hh>
 
+#include "net/client.h"
 #include "net/session.h"
 #include "proto/master.pb.h"
 #include "raft/storage.h"
@@ -22,13 +23,11 @@ class RaftSender {
         std::string host;
         uint16_t port;
         bool last_error_log;
-        seastar::shared_mutex sess_mutex;
-        net::SessionPtr sess;
+        seastar::lw_shared_ptr<net::Client> client;
         std::optional<net::StreamPtr> stream;
         seastar::gate gate;
 
         Client(uint64_t id, const std::string& raft_host, uint16_t raft_port);
-        seastar::future<Status<>> Connect();
         seastar::future<> Send(std::vector<Buffer> buffers);
 
         seastar::future<Status<>> SendSnapshot(raft::MessagePtr msg,

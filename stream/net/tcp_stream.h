@@ -69,7 +69,9 @@ class TcpStream : public Stream {
 
     uint32_t ID() const { return id_; }
 
-    bool Valid() const { return !gate_.is_closed(); }
+    uint64_t SessID() const;
+
+    bool Valid() const;
 
     uint32_t MaxFrameSize() const { return frame_size_; }
 

@@ -38,7 +38,7 @@ static std::unordered_map<ErrCode, const char*> codeMaps = {
     {ErrCode::ErrRaftStepLocalMsg, "step local msg"},
     {ErrCode::ErrRaftStepPeerNotFound, "raft peer not found"},
     {ErrCode::ErrRaftAbort, "raft abort"},
-    {ErrCode::ErrUnExpect, "unexpect error"},
+    {ErrCode::ErrInternal, "internal error"},
 };
 
 const char* GetReason(ErrCode code) {

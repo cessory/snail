@@ -15,7 +15,7 @@ namespace net {
 struct Option {
     bool keep_alive_enable = true;
     int keep_alive_interval = 10;      // unit: s
-    int write_timeout_s = 10;          // unit: s
+    int write_timeout_ms = 200;        // unit: ms
     uint32_t max_frame_size = 131072;  // 128K
 };
 
@@ -29,6 +29,7 @@ class Stream {
    public:
     virtual ~Stream() {}
     virtual uint32_t ID() const = 0;
+    virtual uint64_t SessID() const = 0;
     virtual uint32_t MaxFrameSize() const = 0;
     virtual seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(
         int timeout = -1) = 0;

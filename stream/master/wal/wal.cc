@@ -50,7 +50,7 @@ seastar::future<Status<>> RaftWal::LoadHardState() {
                 if (st.IsNotFound()) {
                     return s;
                 }
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
             s.SetValue(std::move(value));
@@ -89,7 +89,7 @@ seastar::future<Status<>> RaftWal::LoadSnapshot() {
                 if (st.IsNotFound()) {
                     return s;
                 }
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
 
@@ -139,7 +139,7 @@ seastar::future<Status<>> RaftWal::LoadLastIndex() {
             auto st = iter->status();
             if (!st.ok()) {
                 LOG_ERROR("get last index from wal error: {}", st.ToString());
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
             if (iter->Valid()) {
@@ -268,7 +268,7 @@ seastar::future<Status<>> RaftWal::Save(std::vector<raft::EntryPtr> entries,
 
             auto st = db->Write(wo, &batch);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
             }
             return s;
         });
@@ -328,7 +328,7 @@ seastar::future<Status<std::vector<raft::EntryPtr>>> RaftWal::Entries(
             auto st = iter->status();
             if (!st.ok()) {
                 LOG_ERROR("get entries from wal error: {}", st.ToString());
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
             size_t n = 0;
@@ -378,7 +378,7 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
                 if (st.IsNotFound()) {
                     return s;
                 }
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
 
@@ -401,7 +401,7 @@ seastar::future<Status<uint64_t>> RaftWal::Term(uint64_t index) {
     if (!entry.Unmarshal(
             Buffer(st.Value().data(), st.Value().size(), seastar::deleter()))) {
         LOG_ERROR("unmarshal log entry error, group={}", group_);
-        s.Set(ErrCode::ErrUnExpect, "unmarshal log entry error");
+        s.Set(ErrCode::ErrInternal, "unmarshal log entry error");
         co_return s;
     }
     s.SetValue(entry.term());
@@ -443,7 +443,7 @@ seastar::future<Status<>> RaftWal::Release(uint64_t index) {
                               rocksdb::Slice(end.begin(), end.size()));
             auto st = db->Write(wo, &batch);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
             }
             return s;
         });
@@ -492,7 +492,7 @@ seastar::future<Status<>> RaftWal::ApplySnapshot(uint64_t index,
                               rocksdb::Slice(end.get(), end.size()));
             auto st = db->Write(wo, &batch);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
             }
             return s;
         });
@@ -530,7 +530,7 @@ seastar::future<Status<>> RaftWalFactory::OpenDB() {
 
         auto st = rocksdb::DB::Open(options, path_, &db_);
         if (!st.ok()) {
-            s.Set(ErrCode::ErrUnExpect, st.ToString());
+            s.Set(ErrCode::ErrInternal, st.ToString());
         }
         return s;
     });

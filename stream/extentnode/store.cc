@@ -120,7 +120,7 @@ static seastar::future<Status<std::map<uint32_t, ExtentPtr>>> LoadExtents(
                     "read device {} extent meta error: invalid index "
                     "index={} expect index={}",
                     name, extent_ptr->index, index);
-                s.Set(ErrCode::ErrUnExpect, "invalid index");
+                s.Set(ErrCode::ErrInternal, "invalid index");
                 return s;
             }
             extent_ht[index] = extent_ptr;
@@ -154,7 +154,7 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
                     "device {} chunk meta has invalid index, index={} expect "
                     "index={}",
                     name, chunk.index, index);
-                s.Set(ErrCode::ErrUnExpect, "invalid index");
+                s.Set(ErrCode::ErrInternal, "invalid index");
                 return s;
             }
             chunk_ht[index] = chunk;
@@ -257,7 +257,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
             Status<> s;
             auto iter = extent_ht.find(ext.index);
             if (iter == extent_ht.end()) {
-                s.Set(ErrCode::ErrUnExpect, "not found extent index");
+                s.Set(ErrCode::ErrInternal, "not found extent index");
                 return s;
             }
             LOG_DEBUG("load a extent from journal extent-{} index={}", ext.id,
@@ -270,7 +270,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
         [&chunk_ht](const ChunkEntry& chunk) -> Status<> {
             Status<> s;
             if (chunk_ht.count(chunk.index) != 1) {
-                s.Set(ErrCode::ErrUnExpect, "not found chunk index");
+                s.Set(ErrCode::ErrInternal, "not found chunk index");
                 return s;
             }
             LOG_DEBUG("load a chunk from journal index={} next={} len={}",
@@ -566,7 +566,7 @@ seastar::future<Status<std::string>> Store::GetLastSectorData(
     if (opt.has_value()) {
         std::string last_sector_data = opt.value();
         if (last_sector_data.size() != last_sector_size) {
-            s.Set(ErrCode::ErrUnExpect,
+            s.Set(ErrCode::ErrInternal,
                   "the last sector data(in cache) size is invalid");
             co_return s;
         }
@@ -580,7 +580,7 @@ seastar::future<Status<std::string>> Store::GetLastSectorData(
                     ChunkPhyLen(chunk);
     size_t aligned_offset = seastar::align_down(offset, kSectorSize);
     if (offset - aligned_offset != last_sector_size) {
-        s.Set(ErrCode::ErrUnExpect,
+        s.Set(ErrCode::ErrInternal,
               "the last sector data(in disk) size is invalid");
         co_return s;
     }
@@ -672,7 +672,7 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
             "last_sector_size={} is not match with cached data size={} chunk "
             "len={}",
             last_sector_size, last_sector_cached_data.size(), chunk.len);
-        s.Set(ErrCode::ErrUnExpect,
+        s.Set(ErrCode::ErrInternal,
               "last sector size is not match with cached data size");
         return s;
     }
@@ -680,7 +680,7 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
     if (!first && last_sector_size != 0) {
         LOG_ERROR("last_sector_size={} is not zero, but this is not a first io",
                   last_sector_size);
-        s.Set(ErrCode::ErrUnExpect,
+        s.Set(ErrCode::ErrInternal,
               "last sector size is not match with cached data size");
         return s;
     }
@@ -1008,7 +1008,7 @@ seastar::future<Status<std::vector<Buffer>>> Store::Read(ExtentPtr extent_ptr,
                 "read extent error: unexpect bytes, extent={} off={} chunk "
                 "index={}",
                 extent_ptr->id, off, i);
-            s.Set(ErrCode::ErrUnExpect, "read unexcept bytes");
+            s.Set(ErrCode::ErrInternal, "read unexcept bytes");
             co_return s;
         }
         buf.trim(buffer_len);

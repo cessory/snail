@@ -28,6 +28,10 @@ StreamPtr TcpStream::make_stream(uint32_t id, uint8_t ver, uint32_t frame_size,
     return seastar::dynamic_pointer_cast<Stream, TcpStream>(stream);
 }
 
+uint64_t TcpStream::SessID() const { return sess_->ID(); }
+
+bool TcpStream::Valid() const { return !gate_.is_closed() && sess_->Valid(); }
+
 seastar::future<Status<seastar::temporary_buffer<char>>> TcpStream::ReadFrame(
     int timeout) {
     Status<seastar::temporary_buffer<char>> s;

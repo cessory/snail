@@ -140,7 +140,7 @@ static seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> CreateService(
     if (disk_cfg.shard == seastar::this_shard_id()) {
         auto store = co_await Store::Load(disk_cfg.name, disk_cfg.spdk_nvme);
         if (!store) {
-            s.Set(ErrCode::ErrUnExpect);
+            s.Set(ErrCode::ErrInternal);
             co_return s;
         }
         auto service =
@@ -155,7 +155,7 @@ static seastar::future<Status<seastar::foreign_ptr<ServicePtr>>> CreateService(
                 auto store =
                     co_await Store::Load(disk_cfg.name, disk_cfg.spdk_nvme);
                 if (!store) {
-                    s.Set(ErrCode::ErrUnExpect);
+                    s.Set(ErrCode::ErrInternal);
                     co_return s;
                 }
                 auto service = seastar::make_foreign(

@@ -219,7 +219,7 @@ class SmSnapshotImpl : public SmSnapshot {
                     len = p - b.get();
                 }
                 if (!iter_->status().ok()) {
-                    s.Set(ErrCode::ErrUnExpect, iter_->status().ToString());
+                    s.Set(ErrCode::ErrInternal, iter_->status().ToString());
                 }
                 return s;
             });
@@ -303,7 +303,7 @@ seastar::future<Status<StoragePtr>> Storage::Create(
                 opt.keep_log_file_num = 10;
                 auto st = rocksdb::DB::Open(opt, path, &db);
                 if (!st.ok()) {
-                    s.Set(ErrCode::ErrUnExpect, st.ToString());
+                    s.Set(ErrCode::ErrInternal, st.ToString());
                     return s;
                 }
                 s.SetValue(db);
@@ -327,7 +327,7 @@ seastar::future<Status<StoragePtr>> Storage::Create(
         raft_nodes = cfg_nodes;
     }
     if (raft_nodes.empty()) {
-        s.Set(ErrCode::ErrUnExpect, "raft node is empty");
+        s.Set(ErrCode::ErrInternal, "raft node is empty");
         co_return s;
     }
     auto st3 = co_await snail::stream::RaftServer::Create(
@@ -415,7 +415,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::LoadRaftConfig() {
 
             RaftNode node;
             if (!node.ParseFromArray(value.data(), value.size())) {
-                s.Set(ErrCode::ErrUnExpect, "invalid raft node");
+                s.Set(ErrCode::ErrInternal, "invalid raft node");
                 break;
             }
             if (node.id() == 0) {
@@ -426,7 +426,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::LoadRaftConfig() {
         }
         auto st = iter->status();
         if (!st.ok()) {
-            s.Set(ErrCode::ErrUnExpect, st.ToString());
+            s.Set(ErrCode::ErrInternal, st.ToString());
         }
         delete iter;
         return s;
@@ -612,7 +612,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::ApplySnapshot(
     }
     seastar::gate::holder holder(gate_);
     if (!meta_payload.ParseFromArray(meta->data().get(), meta->data().size())) {
-        s.Set(ErrCode::ErrUnExpect, "failed to parse meta");
+        s.Set(ErrCode::ErrInternal, "failed to parse meta");
         co_await body->Close();
         co_return s;
     }
@@ -755,7 +755,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::Put(Buffer key, Buffer val,
             auto st = db_->Put(wo, rocksdb::Slice(key.get(), key.size()),
                                rocksdb::Slice(val.get(), val.size()));
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
             }
             return s;
         });
@@ -779,7 +779,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::Write(WriteBatch batch,
 
             auto st = db_->Write(wo, &batch.batch_);
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
             }
             return s;
         });
@@ -806,7 +806,7 @@ seastar::future<Status<Buffer>> Storage::StatemachineImpl::Get(Buffer key) {
                 if (st.IsNotFound()) {
                     return std::move(s);
                 }
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
             s.SetValue(std::move(value));
@@ -843,7 +843,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::Delete(Buffer key,
 
             auto st = db_->Delete(wo, rocksdb::Slice(key.get(), key.size()));
             if (!st.ok()) {
-                s.Set(ErrCode::ErrUnExpect, st.ToString());
+                s.Set(ErrCode::ErrInternal, st.ToString());
                 return s;
             }
             return s;
@@ -910,7 +910,7 @@ seastar::future<Status<>> Storage::StatemachineImpl::Flush() {
         opts.wait = true;
         auto st = db_->Flush(opts);
         if (!st.ok()) {
-            s.Set(ErrCode::ErrUnExpect, st.ToString());
+            s.Set(ErrCode::ErrInternal, st.ToString());
         }
         return s;
     });
@@ -956,7 +956,7 @@ Storage::StatemachineImpl::Range(rocksdb::Iterator* iter, size_t n) {
                     }
                     auto st1 = iter->status();
                     if (!st1.ok()) {
-                        st.Set(ErrCode::ErrUnExpect, st1.ToString());
+                        st.Set(ErrCode::ErrInternal, st1.ToString());
                     } else {
                         st.SetValue(std::move(res));
                     }

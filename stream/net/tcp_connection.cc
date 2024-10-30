@@ -21,7 +21,7 @@ seastar::future<Status<>> TcpConnection::Write(seastar::net::packet&& p) {
     } catch (std::system_error& e) {
         s.Set(e.code().value());
     } catch (std::exception& e) {
-        s.Set(ErrCode::ErrUnExpect, e.what());
+        s.Set(ErrCode::ErrInternal, e.what());
     }
     co_return s;
 }
@@ -37,7 +37,7 @@ seastar::future<Status<size_t>> TcpConnection::Read(char* buffer, size_t len) {
     } catch (std::system_error& e) {
         s.Set(e.code().value());
     } catch (std::exception& e) {
-        s.Set(ErrCode::ErrUnExpect, e.what());
+        s.Set(ErrCode::ErrInternal, e.what());
     }
     co_return s;
 }
@@ -61,7 +61,7 @@ seastar::future<Status<size_t>> TcpConnection::ReadExactly(char* buffer,
             s.Set(e.code().value());
             co_return s;
         } catch (std::exception& e) {
-            s.Set(ErrCode::ErrUnExpect, e.what());
+            s.Set(ErrCode::ErrInternal, e.what());
             co_return s;
         }
     }

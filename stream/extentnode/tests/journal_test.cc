@@ -185,7 +185,7 @@ LoadExtents(DevicePtr dev_ptr, uint64_t off, size_t size) {
                     "read device {} extent meta error: invalid index "
                     "index={} expect index={}",
                     dev_ptr->Name(), extent.index, index);
-                s.Set(ErrCode::ErrUnExpect, "invalid index");
+                s.Set(ErrCode::ErrInternal, "invalid index");
                 return s;
             }
             extent_ht[index] = extent;
@@ -213,7 +213,7 @@ LoadChunks(DevicePtr dev_ptr, uint64_t off, size_t size) {
                     "read device {} chunk meta error: invalid index "
                     "index={} expect index={}",
                     dev_ptr->Name(), chunk.index, index);
-                s.Set(ErrCode::ErrUnExpect, "invalid index");
+                s.Set(ErrCode::ErrInternal, "invalid index");
                 return s;
             }
             chunk_ht[index] = chunk;

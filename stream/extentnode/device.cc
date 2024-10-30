@@ -78,12 +78,12 @@ class KernelDevice : public Device {
         try {
             auto n = co_await fp_.dma_write(pos, b, len);
             if (n != len) {
-                s.Set(ErrCode::ErrUnExpect, "return unexpect bytes");
+                s.Set(ErrCode::ErrInternal, "return unexpect bytes");
             }
         } catch (std::system_error& e) {
             s.Set(e.code().value());
         } catch (std::exception& e) {
-            s.Set(ErrCode::ErrUnExpect, e.what());
+            s.Set(ErrCode::ErrInternal, e.what());
         }
         co_return s;
     }
@@ -124,14 +124,14 @@ class KernelDevice : public Device {
                                                           fu_vec.end());
             for (int i = 0; i < res.size(); i++) {
                 if (res[i] != iov[i].iov_len) {
-                    s.Set(ErrCode::ErrUnExpect, "return unexpect bytes");
+                    s.Set(ErrCode::ErrInternal, "return unexpect bytes");
                     break;
                 }
             }
         } catch (std::system_error& e) {
             s.Set(e.code().value());
         } catch (std::exception& e) {
-            s.Set(ErrCode::ErrUnExpect, e.what());
+            s.Set(ErrCode::ErrInternal, e.what());
         }
         co_return s;
     }
@@ -161,7 +161,7 @@ class KernelDevice : public Device {
         } catch (std::system_error& e) {
             s.Set(e.code().value());
         } catch (std::exception& e) {
-            s.Set(ErrCode::ErrUnExpect, e.what());
+            s.Set(ErrCode::ErrInternal, e.what());
         }
         co_return s;
     }

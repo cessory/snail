@@ -1,3 +1,5 @@
+#include "net/client.h"
+
 #include <seastar/core/app-template.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
@@ -41,24 +43,13 @@ seastar::future<> test_stream(snail::net::StreamPtr stream) {
 }
 
 seastar::future<> test_client(uint16_t port) {
-    seastar::socket_address sa(seastar::ipv4_addr("127.0.0.1", port));
-
-    auto fd = seastar::engine().make_pollable_fd(sa, 0);
-    try {
-        co_await seastar::engine().posix_connect(fd, sa,
-                                                 seastar::socket_address());
-    } catch (std::exception& e) {
-        std::cout << "connect server error: " << e.what() << std::endl;
-        co_return;
-    }
-    auto conn = snail::net::TcpConnection::make_connection(std::move(fd), sa);
-
     snail::net::Option opt;
-    auto sess = snail::net::TcpSession::make_session(opt, conn, true);
+    auto client =
+        seastar::make_lw_shared<snail::net::Client>("127.0.0.1", port, opt);
 
     std::vector<seastar::future<>> fu_vec;
     for (int i = 0; i < 10; i++) {
-        auto s = co_await sess->OpenStream();
+        auto s = co_await client->Get();
         if (!s.OK()) {
             std::cout << "open stream error: " << s.Reason() << std::endl;
             break;
@@ -68,7 +59,7 @@ seastar::future<> test_client(uint16_t port) {
     }
     std::cout << "has " << fu_vec.size() << " streams" << std::endl;
     co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
-    co_await sess->Close();
+    co_await client->Close();
     co_return;
 }
 

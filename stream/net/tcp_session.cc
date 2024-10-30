@@ -287,8 +287,9 @@ seastar::future<> TcpSession::SendLoop() {
             }
         }
         if (packet.len() > 0) {
-            if (opt_.write_timeout_s > 0) {
-                write_timer.arm(std::chrono::seconds(opt_.write_timeout_s));
+            if (opt_.write_timeout_ms > 0) {
+                write_timer.arm(
+                    std::chrono::milliseconds(opt_.write_timeout_ms));
             }
             s = co_await conn_->Write(std::move(packet));
             write_timer.cancel();
@@ -467,17 +468,22 @@ seastar::future<Status<StreamPtr>> TcpSession::AcceptStream() {
 
 seastar::future<> TcpSession::Close() {
     if (!gate_.is_closed()) {
+        std::vector<seastar::future<>> fu_vec;
         auto fu = gate_.close();
+        fu_vec.emplace_back(std::move(fu));
         w_cv_.signal();
         accept_sem_.broken();
         token_cv_.signal();
         accept_cv_.signal();
         keepalive_timer_.cancel();
         conn_->Close();
-        co_await std::move(send_fu_.value());
-        co_await std::move(recv_fu_.value());
-        co_await CloseAllStreams();
-        co_await std::move(fu);
+        fu = std::move(send_fu_.value());
+        fu_vec.emplace_back(std::move(fu));
+        fu = std::move(recv_fu_.value());
+        fu_vec.emplace_back(std::move(fu));
+        fu = CloseAllStreams();
+        fu_vec.emplace_back(std::move(fu));
+        co_await seastar::when_all_succeed(fu_vec.begin(), fu_vec.end());
     }
     co_return;
 }
