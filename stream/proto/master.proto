@@ -4,12 +4,14 @@ package snail.stream;
 import "common.proto";
 
 enum MasterMsgType {
-    ALLOC_DISKID_REQ = 0; 
-    ALLOC_DISKID_RESP = 1; 
-    ADD_NODE_REQ = 2;
-    ADD_NODE_RESP = 3;
-    ADD_DISK_REQ = 4;
-    ADD_DISK_RESP = 5;
+    GET_CLUSTER_INFO_REQ = 0;
+    GET_CLUSTER_INFO_RESP = 1; 
+    ALLOC_DISKID_REQ = 2; 
+    ALLOC_DISKID_RESP = 3; 
+    ADD_NODE_REQ = 4;
+    ADD_NODE_RESP = 5;
+    ADD_DISK_REQ = 6;
+    ADD_DISK_RESP = 7;
 }
 
 message RaftNode {
@@ -24,6 +26,10 @@ message RaftNode {
 message SnapshotMetaPayload {
     string name = 1;
     repeated RaftNode nodes = 2; 
+}
+
+message GetClusterInfoResp {
+    CommonResp header = 1;
 }
 
 message AllocDiskIdReq {

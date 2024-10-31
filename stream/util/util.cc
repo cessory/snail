@@ -1,5 +1,7 @@
 #include "util.h"
 
+#include <uuid/uuid.h>
+
 #include <string_view>
 namespace snail {
 
@@ -94,6 +96,15 @@ const char* GetVarint64(const char* s, size_t n, uint64_t* v) {
         }
     }
     return nullptr;
+}
+
+std::string GenerateReqid() {
+    uuid_t uuid;
+    std::string out;
+    out.resize(UUID_STR_LEN + 1);
+    uuid_generate(uuid);
+    uuid_unparse_lower(uuid, out.data());
+    return out;
 }
 
 }  // namespace snail

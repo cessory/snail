@@ -20,6 +20,7 @@ char* PutVarint64(char* dst, uint64_t v);
 
 const char* GetVarint32(const char* s, size_t n, uint32_t* v);
 const char* GetVarint64(const char* s, size_t n, uint64_t* v);
+std::string GenerateReqid();
 
 }  // namespace snail
 

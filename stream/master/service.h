@@ -17,6 +17,9 @@ class Service {
                      ExtentnodeMgr* extentnode_mgr);
 
     seastar::future<Status<>> HandleMessage(net::Stream* stream, Buffer b);
+
+    seastar::future<Status<>> HandleGetClusterInfo(const CommonReq* req,
+                                                   net::Stream* stream);
     // alloca an disk id
     seastar::future<Status<>> HandleAllocaDiskID(const AllocDiskIdReq* req,
                                                  net::Stream* stream);
