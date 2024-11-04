@@ -45,7 +45,7 @@ seastar::future<> Client::RecyleLoop() {
                 co_await seastar::when_all_succeed(fu_vec.begin(),
                                                    fu_vec.end());
             }
-            if (impl->sess_->Streams() == 0) {
+            if (impl->sess_->Streams() == 0 || !impl->sess_->Valid()) {
                 co_await impl->sess_->Close();
                 recyle_list_.erase(iter++);
             } else {
