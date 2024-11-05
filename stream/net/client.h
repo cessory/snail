@@ -15,6 +15,7 @@ class Client {
     uint16_t port_;
     Option opt_;
     uint32_t connect_timeout_;  // ms
+    net::BufferAllocator* allocator_;
     seastar::shared_mutex mu_;
     struct SessionImpl {
         SessionPtr sess_;
@@ -31,8 +32,8 @@ class Client {
 
    public:
     explicit Client(const std::string& host, uint16_t port,
-                    const Option opt = Option(),
-                    uint32_t connect_timeout = 100);
+                    const Option opt = Option(), uint32_t connect_timeout = 100,
+                    net::BufferAllocator* allocator = nullptr);
 
     seastar::future<Status<StreamPtr>> Get();
 

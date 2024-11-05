@@ -13,8 +13,12 @@ namespace snail {
 namespace net {
 
 Client::Client(const std::string& host, uint16_t port, const Option opt,
-               uint32_t connect_timeout)
-    : host_(host), port_(port), opt_(opt), connect_timeout_(connect_timeout) {
+               uint32_t connect_timeout, net::BufferAllocator* allocator)
+    : host_(host),
+      port_(port),
+      opt_(opt),
+      connect_timeout_(connect_timeout),
+      allocator_(allocator) {
     if (connect_timeout_ == 0) connect_timeout_ = 100;
     (void)RecyleLoop();
 }

@@ -30,7 +30,7 @@ class TcpSession : public Session {
     uint32_t max_stream_buffer_;
     TcpConnectionPtr conn_;
     bool client_;
-    std::unique_ptr<BufferAllocator> allocator_;
+    BufferAllocator *allocator_;
     uint32_t next_id_;
 
     std::unordered_map<uint32_t, TcpStreamPtr> streams_;
@@ -99,11 +99,11 @@ class TcpSession : public Session {
 
    public:
     explicit TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
-                        std::unique_ptr<BufferAllocator> allocator = nullptr);
+                        BufferAllocator *allocator = nullptr);
 
-    static SessionPtr make_session(
-        const Option &opt, TcpConnectionPtr conn, bool client,
-        std::unique_ptr<BufferAllocator> allocator = nullptr);
+    static SessionPtr make_session(const Option &opt, TcpConnectionPtr conn,
+                                   bool client,
+                                   BufferAllocator *allocator = nullptr);
 
     virtual ~TcpSession();
 

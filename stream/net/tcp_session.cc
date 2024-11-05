@@ -29,8 +29,10 @@ class DefaultBufferAllocator : public BufferAllocator {
     }
 };
 
+static DefaultBufferAllocator defaultAllocator;
+
 TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
-                       std::unique_ptr<BufferAllocator> allocator)
+                       BufferAllocator *allocator)
     : opt_(opt),
       sess_id_(TcpSession::session_id_++),
       max_receive_buffer_(
@@ -39,9 +41,9 @@ TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
           std::max(8 * opt.max_frame_size, kMinStreamBufferSize)),
       conn_(std::move(conn)),
       client_(client),
-      allocator_(allocator ? allocator.release()
-                           : dynamic_cast<BufferAllocator *>(
-                                 new DefaultBufferAllocator())),
+      allocator_(allocator
+                     ? allocator
+                     : dynamic_cast<BufferAllocator *>(&defaultAllocator)),
       next_id_((client ? 1 : 0)),
       accept_sem_(default_accept_backlog),
       tokens_(max_receive_buffer_) {
@@ -52,11 +54,10 @@ TcpSession::TcpSession(const Option &opt, TcpConnectionPtr conn, bool client,
 
 TcpSession::~TcpSession() { ClearWriteq(); }
 
-SessionPtr TcpSession::make_session(
-    const Option &opt, TcpConnectionPtr conn, bool client,
-    std::unique_ptr<BufferAllocator> allocator) {
-    auto sess_ptr = seastar::make_shared<TcpSession>(opt, conn, client,
-                                                     std::move(allocator));
+SessionPtr TcpSession::make_session(const Option &opt, TcpConnectionPtr conn,
+                                    bool client, BufferAllocator *allocator) {
+    auto sess_ptr =
+        seastar::make_shared<TcpSession>(opt, conn, client, allocator);
     sess_ptr->recv_fu_ = sess_ptr->RecvLoop();
     sess_ptr->send_fu_ = sess_ptr->SendLoop();
     sess_ptr->StartKeepalive();
