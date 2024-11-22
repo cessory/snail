@@ -33,33 +33,9 @@ static bool ParseResponse(Buffer b, ::google::protobuf::Message* resp,
     return resp->ParseFromArray(b.get(), b.size());
 }
 
-static seastar::future<Status<Buffer>> ReadFrame(net::Stream* stream,
-                                                 unsigned shard) {
-    Status<Buffer> s;
-    if (seastar::this_shard_id() == shard) {
-        s = co_await stream->ReadFrame();
-        co_return s;
-    }
-    auto st = co_await seastar::smp::submit_to(
-        shard,
-        [stream]() -> seastar::future<
-                       Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>>> {
-            Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>> s;
-            auto st = co_await stream->ReadFrame();
-            s.Set(st.Code(), st.Reason());
-            if (st) {
-                s.SetValue(seastar::make_foreign(
-                    std::make_unique<Buffer>(std::move(st.Value()))));
-            }
-            co_return std::move(s);
-        });
-    s.SetValue(foreign_buffer_copy(std::move(st.Value())));
-    co_return s;
-}
-
 static seastar::future<Status<std::unique_ptr<GetExtentResp>>> GetExtent(
     Service& service, const ExtentID extent_id, net::Stream* client_stream,
-    net::Stream* server_stream, unsigned shard) {
+    net::Stream* server_stream) {
     Status<std::unique_ptr<GetExtentResp>> s;
     char str_extent_id[16];
     net::BigEndian::PutUint64(&str_extent_id[0], extent_id.hi);
@@ -70,8 +46,7 @@ static seastar::future<Status<std::unique_ptr<GetExtentResp>>> GetExtent(
     req->set_diskid(1);
     req->set_extent_id(std::string(str_extent_id, 16));
 
-    auto st1 =
-        co_await service.HandleGetExtent(req.get(), server_stream, shard);
+    auto st1 = co_await service.HandleGetExtent(req.get(), server_stream);
     if (!st1) {
         LOG_ERROR("get extent={} error: {}", extent_id, st1);
         s.Set(st1.Code(), st1.Reason());
@@ -79,7 +54,7 @@ static seastar::future<Status<std::unique_ptr<GetExtentResp>>> GetExtent(
     }
 
     Buffer resp_buf;
-    auto st2 = co_await ReadFrame(client_stream, shard);
+    auto st2 = co_await client_stream->ReadFrame();
     if (!st2) {
         s.Set(st2.Code(), st2.Reason());
         co_return s;
@@ -171,9 +146,7 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
                 s = client_stream->WriteFrame(std::move(packets)).get0();
                 BOOST_REQUIRE(s);
             }
-            s = service
-                    .HandleWriteExtent(req.get(), server_stream.get(),
-                                       seastar::this_shard_id())
+            s = service.HandleWriteExtent(req.get(), server_stream.get())
                     .get0();
             BOOST_REQUIRE(s);
             auto st = client_stream->ReadFrame().get0();
@@ -205,8 +178,8 @@ SEASTAR_THREAD_TEST_CASE(handle_write_read_test) {
 
         LOG_INFO("begin read i={} off={} len={}", i, read_req->off(),
                  read_req->len());
-        auto fu = service.HandleReadExtent(
-            read_req.get(), read_server_stream.get(), seastar::this_shard_id());
+        auto fu =
+            service.HandleReadExtent(read_req.get(), read_server_stream.get());
 
         auto st2 = read_client_stream->ReadFrame().get0();
         BOOST_REQUIRE(st2);
@@ -348,12 +321,10 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
                     }).get0();
                 BOOST_REQUIRE(s);
             }
-            s = service
-                    .HandleWriteExtent(req.get(), server_stream.get(),
-                                       server_stream.get_owner_shard())
+            s = service.HandleWriteExtent(req.get(), server_stream.get())
                     .get0();
             BOOST_REQUIRE(s);
-            auto st = ReadFrame(client_stream.get(), 1).get0();
+            auto st = client_stream->ReadFrame().get0();
             BOOST_REQUIRE(st);
             Buffer resp_buf = std::move(st.Value());
             std::unique_ptr<CommonResp> resp(new CommonResp());
@@ -363,10 +334,9 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
             BOOST_REQUIRE_EQUAL(extent_ptr->len, body_len * (i + 1));
         }
 
-        auto st =
-            GetExtent(service, extent_id, client_stream.get(),
-                      server_stream.get(), client_stream.get_owner_shard())
-                .get0();
+        auto st = GetExtent(service, extent_id, client_stream.get(),
+                            server_stream.get())
+                      .get0();
         BOOST_REQUIRE(st);
         BOOST_REQUIRE_EQUAL(st.Value()->len(), 16 << 20);
     }
@@ -406,10 +376,9 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
             stat.foreign_mallocs(), stat.foreign_frees(),
             stat.foreign_cross_frees());
         auto fu =
-            service.HandleReadExtent(read_req.get(), read_server_stream.get(),
-                                     read_server_stream.get_owner_shard());
+            service.HandleReadExtent(read_req.get(), read_server_stream.get());
 
-        auto st2 = ReadFrame(read_client_stream.get(), 1).get0();
+        auto st2 = read_client_stream->ReadFrame().get0();
         BOOST_REQUIRE(st2.OK());
         Buffer read_buf = std::move(st2.Value());
         std::unique_ptr<ReadExtentResp> read_resp(new ReadExtentResp);
@@ -424,7 +393,7 @@ SEASTAR_THREAD_TEST_CASE(handle_multi_thread_write_read_test) {
         bool first = true;
         size_t first_block_len = kBlockDataSize - offs[i] % kBlockDataSize;
         while (read_len < read_resp->len()) {
-            auto st3 = ReadFrame(read_client_stream.get(), 1).get0();
+            auto st3 = read_client_stream->ReadFrame().get0();
             if (st3.Code() == ErrCode::ErrEOF) {
                 break;
             }
@@ -477,10 +446,7 @@ SEASTAR_THREAD_TEST_CASE(handle_create_test) {
     req->set_diskid(1);
     req->set_extent_id(std::string(str_extent_id, 16));
 
-    s = service
-            .HandleCreateExtent(req.get(), server_stream.get(),
-                                seastar::this_shard_id())
-            .get0();
+    s = service.HandleCreateExtent(req.get(), server_stream.get()).get0();
     BOOST_REQUIRE(s);
     auto st = client_stream->ReadFrame().get();
     BOOST_REQUIRE(st);
@@ -520,10 +486,7 @@ SEASTAR_THREAD_TEST_CASE(handle_delete_extent_test) {
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
-        s = service
-                .HandleCreateExtent(req.get(), server_stream.get(),
-                                    seastar::this_shard_id())
-                .get0();
+        s = service.HandleCreateExtent(req.get(), server_stream.get()).get0();
         BOOST_REQUIRE(s);
         auto st = client_stream->ReadFrame().get();
         BOOST_REQUIRE(st);
@@ -547,10 +510,7 @@ SEASTAR_THREAD_TEST_CASE(handle_delete_extent_test) {
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
-        s = service
-                .HandleDeleteExtent(req.get(), server_stream.get(),
-                                    seastar::this_shard_id())
-                .get0();
+        s = service.HandleDeleteExtent(req.get(), server_stream.get()).get0();
         BOOST_REQUIRE(s);
         auto st = client_stream->ReadFrame().get();
         BOOST_REQUIRE(st);
@@ -595,10 +555,7 @@ SEASTAR_THREAD_TEST_CASE(handle_get_extent_test) {
         req->set_diskid(1);
         req->set_extent_id(std::string(str_extent_id, 16));
 
-        s = service
-                .HandleCreateExtent(req.get(), server_stream.get(),
-                                    seastar::this_shard_id())
-                .get0();
+        s = service.HandleCreateExtent(req.get(), server_stream.get()).get0();
         BOOST_REQUIRE(s);
         auto st = client_stream->ReadFrame().get();
         BOOST_REQUIRE(st);
@@ -629,7 +586,7 @@ SEASTAR_THREAD_TEST_CASE(handle_get_extent_test) {
         req->set_extent_id(std::string(str_extent_id, 16));
 
         auto st = GetExtent(service, extent_id, client_stream.get(),
-                            server_stream.get(), seastar::this_shard_id())
+                            server_stream.get())
                       .get0();
         BOOST_REQUIRE(st);
 

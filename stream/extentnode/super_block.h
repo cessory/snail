@@ -9,10 +9,8 @@ namespace stream {
 enum {
     EXTENT_PT = 0,
     CHUNK_PT = 1,
-    JOURNALA_PT = 2,
-    JOURNALB_PT = 3,
-    DATA_PT = 4,
-    MAX_PT = 5,
+    DATA_PT = 2,
+    MAX_PT = 3,
 };
 
 struct Partition {
@@ -20,7 +18,7 @@ struct Partition {
     uint64_t size = 0;
 };
 
-constexpr uint32_t kSuperBlockSize = 108;
+constexpr uint32_t kSuperBlockSize = 76;
 
 struct SuperBlock {
     uint32_t magic = 0;
@@ -30,7 +28,7 @@ struct SuperBlock {
     uint32_t dev_id = 0;
     uint64_t capacity = 0;
     std::array<Partition, MAX_PT> pt;  // extent meta pt[0] chunk meta pt[1]
-                                       // log pt[2] pt[3] data pt[4]
+                                       // data pt[2]
 
     SuperBlock() = default;
     SuperBlock(const SuperBlock &x) {
@@ -63,11 +61,6 @@ struct SuperBlock {
 
     inline uint64_t ChunkMetaOffset() const { return pt[CHUNK_PT].start; }
     inline uint64_t ChunkMetaSize() const { return pt[CHUNK_PT].size; }
-
-    inline uint64_t Journal1Offset() const { return pt[JOURNALA_PT].start; }
-    inline uint64_t Journal1Size() const { return pt[JOURNALA_PT].size; }
-    inline uint64_t Journal2Offset() const { return pt[JOURNALB_PT].start; }
-    inline uint64_t Journal2Size() const { return pt[JOURNALB_PT].size; }
 
     inline uint64_t DataOffset() const { return pt[DATA_PT].start; }
     inline uint64_t DataSize() const { return pt[DATA_PT].size; }

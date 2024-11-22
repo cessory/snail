@@ -364,9 +364,12 @@ seastar::future<> Storage::Start() {
 }
 
 seastar::future<> Storage::WaitLeaderChange() {
-    return seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
-        return impl_->WaitLeaderChange();
-    });
+    co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda([this]() -> seastar::future<> {
+            co_await impl_->WaitLeaderChange();
+            co_return;
+        }));
+    co_return;
 }
 
 seastar::future<> Storage::Reload() {
@@ -996,20 +999,26 @@ seastar::future<Status<>> Storage::Propose(Buffer reqid, uint64_t id,
     auto b = entry.Marshal();
     auto foreign_body =
         seastar::make_foreign(std::make_unique<Buffer>(std::move(b)));
-    return seastar::smp::submit_to(
+    auto s = co_await seastar::smp::submit_to(
         shard_,
-        [this, foreign_body = std::move(
-                   foreign_body)]() mutable -> seastar::future<Status<>> {
-            auto body = foreign_buffer_copy(std::move(foreign_body));
-            return raft_->Propose(std::move(body));
-        });
+        seastar::coroutine::lambda(
+            [this, foreign_body = std::move(
+                       foreign_body)]() mutable -> seastar::future<Status<>> {
+                auto body = foreign_buffer_copy(std::move(foreign_body));
+                auto s = co_await raft_->Propose(std::move(body));
+                co_return s;
+            }));
+    co_return s;
 }
 
 seastar::future<Status<uint64_t>> Storage::ReadIndex() {
-    return seastar::smp::submit_to(
-        shard_, [this]() -> seastar::future<Status<uint64_t>> {
-            return raft_->ReadIndex();
-        });
+    auto s = co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda(
+                    [this]() -> seastar::future<Status<uint64_t>> {
+                        auto s = co_await raft_->ReadIndex();
+                        co_return s;
+                    }));
+    co_return s;
 }
 
 seastar::future<Status<>> Storage::Put(Buffer key, Buffer val, bool sync) {
@@ -1017,24 +1026,28 @@ seastar::future<Status<>> Storage::Put(Buffer key, Buffer val, bool sync) {
         seastar::make_foreign(std::make_unique<Buffer>(std::move(key)));
     auto foreign_val =
         seastar::make_foreign(std::make_unique<Buffer>(std::move(val)));
-    return seastar::smp::submit_to(
+    auto s = co_await seastar::smp::submit_to(
         shard_,
-        [this, foreign_key = std::move(foreign_key),
-         foreign_val = std::move(foreign_val),
-         sync]() mutable -> seastar::future<Status<>> {
-            auto local_key = foreign_buffer_copy(std::move(foreign_key));
-            auto local_val = foreign_buffer_copy(std::move(foreign_val));
-            return impl_->Put(std::move(local_key), std::move(local_val), sync);
-        });
+        seastar::coroutine::lambda(
+            [this, foreign_key = std::move(foreign_key),
+             foreign_val = std::move(foreign_val),
+             sync]() mutable -> seastar::future<Status<>> {
+                auto local_key = foreign_buffer_copy(std::move(foreign_key));
+                auto local_val = foreign_buffer_copy(std::move(foreign_val));
+                return impl_->Put(std::move(local_key), std::move(local_val),
+                                  sync);
+            }));
 }
 
 seastar::future<Status<>> Storage::Write(WriteBatch batch, bool sync) {
-    return seastar::smp::submit_to(
-        shard_,
-        [this, batch = std::move(batch),
-         sync]() mutable -> seastar::future<Status<>> {
-            return impl_->Write(std::move(batch), sync);
-        });
+    auto s = co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda(
+                    [this, batch = std::move(batch),
+                     sync]() mutable -> seastar::future<Status<>> {
+                        auto s = co_await impl_->Write(std::move(batch), sync);
+                        co_return s;
+                    }));
+    co_return s;
 }
 
 seastar::future<Status<Buffer>> Storage::Get(Buffer key) {
@@ -1070,13 +1083,16 @@ seastar::future<Status<Buffer>> Storage::Get(Buffer key) {
 seastar::future<Status<>> Storage::Delete(Buffer key, bool sync) {
     auto foreign_key =
         seastar::make_foreign(std::make_unique<Buffer>(std::move(key)));
-    return seastar::smp::submit_to(
+    auto s = co_await seastar::smp::submit_to(
         shard_,
-        [this, foreign_key = std::move(foreign_key),
-         sync]() mutable -> seastar::future<Status<>> {
-            auto local_key = foreign_buffer_copy(std::move(foreign_key));
-            return impl_->Delete(std::move(local_key), sync);
-        });
+        seastar::coroutine::lambda(
+            [this, foreign_key = std::move(foreign_key),
+             sync]() mutable -> seastar::future<Status<>> {
+                auto local_key = foreign_buffer_copy(std::move(foreign_key));
+                auto s = co_await impl_->Delete(std::move(local_key), sync);
+                co_return s;
+            }));
+    co_return s;
 }
 
 seastar::future<Status<>> Storage::DeleteRange(Buffer start, Buffer end,
@@ -1085,16 +1101,19 @@ seastar::future<Status<>> Storage::DeleteRange(Buffer start, Buffer end,
         seastar::make_foreign(std::make_unique<Buffer>(std::move(start)));
     auto foreign_end =
         seastar::make_foreign(std::make_unique<Buffer>(std::move(end)));
-    return seastar::smp::submit_to(
-        shard_,
-        [this, foreign_start = std::move(foreign_start),
-         foreign_end = std::move(foreign_end),
-         sync]() mutable -> seastar::future<Status<>> {
-            auto local_start = foreign_buffer_copy(std::move(foreign_start));
-            auto local_end = foreign_buffer_copy(std::move(foreign_end));
-            return impl_->DeleteRange(std::move(local_start),
-                                      std::move(local_end), sync);
-        });
+    auto s = co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda(
+                    [this, foreign_start = std::move(foreign_start),
+                     foreign_end = std::move(foreign_end),
+                     sync]() mutable -> seastar::future<Status<>> {
+                        auto local_start =
+                            foreign_buffer_copy(std::move(foreign_start));
+                        auto local_end =
+                            foreign_buffer_copy(std::move(foreign_end));
+                        return impl_->DeleteRange(std::move(local_start),
+                                                  std::move(local_end), sync);
+                    }));
+    co_return s;
 }
 
 seastar::future<Status<>> Storage::Range(
@@ -1108,15 +1127,18 @@ seastar::future<Status<>> Storage::Range(
         seastar::make_foreign(std::make_unique<Buffer>(std::move(end)));
 
     auto st1 = co_await seastar::smp::submit_to(
-        shard_,
-        [this, foreign_start = std::move(foreign_start),
-         foreign_end = std::move(foreign_end)]() mutable
-        -> seastar::future<Status<rocksdb::Iterator*>> {
-            auto local_start = foreign_buffer_copy(std::move(foreign_start));
-            auto local_end = foreign_buffer_copy(std::move(foreign_end));
-            return impl_->NewIterator(std::move(local_start),
-                                      std::move(local_end));
-        });
+        shard_, seastar::coroutine::lambda(
+                    [this, foreign_start = std::move(foreign_start),
+                     foreign_end = std::move(foreign_end)]() mutable
+                    -> seastar::future<Status<rocksdb::Iterator*>> {
+                        auto local_start =
+                            foreign_buffer_copy(std::move(foreign_start));
+                        auto local_end =
+                            foreign_buffer_copy(std::move(foreign_end));
+                        auto s = co_await impl_->NewIterator(
+                            std::move(local_start), std::move(local_end));
+                        co_return s;
+                    }));
     if (!st1) {
         s.Set(st1.Code(), st1.Reason());
         co_return s;
@@ -1127,11 +1149,13 @@ seastar::future<Status<>> Storage::Range(
     for (;;) {
         auto st2 = co_await seastar::smp::submit_to(
             shard_,
-            [this, iter, batch]()
-                -> seastar::future<
-                    Status<std::vector<std::pair<std::string, std::string>>>> {
-                return impl_->Range(iter, batch);
-            });
+            seastar::coroutine::lambda(
+                [this, iter, batch]()
+                    -> seastar::future<Status<
+                        std::vector<std::pair<std::string, std::string>>>> {
+                    auto s = co_await impl_->Range(iter, batch);
+                    co_return s;
+                }));
         if (!st2) {
             s.Set(st2.Code(), st2.Reason());
             break;
@@ -1147,23 +1171,25 @@ seastar::future<Status<>> Storage::Range(
         }
     }
 
-    co_await seastar::smp::submit_to(shard_,
-                                     [this, iter]() -> seastar::future<> {
-                                         return impl_->ReleaseIterator(iter);
-                                     });
+    co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda([this, iter]() -> seastar::future<> {
+            co_await impl_->ReleaseIterator(iter);
+            co_return;
+        }));
     co_return s;
 }
 
 seastar::future<> Storage::Close() {
-    co_await seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
-        if (raft_) {
-            co_await raft_->Close();
-            raft_ = nullptr;
-        }
-        co_await impl_->Close();
-        impl_ = nullptr;
-        co_return;
-    });
+    co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda([this]() -> seastar::future<> {
+            if (raft_) {
+                co_await raft_->Close();
+                raft_ = nullptr;
+            }
+            co_await impl_->Close();
+            impl_ = nullptr;
+            co_return;
+        }));
 }
 
 }  // namespace stream

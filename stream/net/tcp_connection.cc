@@ -11,7 +11,7 @@ TcpConnection::TcpConnection(seastar::pollable_fd fd,
                              seastar::socket_address remote)
     : fd_(std::move(fd)), remote_address_(remote), closed_(false) {
     int val = 1;
-    fd_.get_file_desc().setsockopt(IPPROTO_TCP, TCP_NODELAY & val, sizeof(val));
+    fd_.get_file_desc().setsockopt(IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
 }
 
 seastar::future<Status<>> TcpConnection::Write(seastar::net::packet&& p) {

@@ -162,6 +162,21 @@ struct ExtentEntry {
     void Unmarshal(const char* b);
 };
 
+class Store;
+
+struct Extent : public ExtentEntry {
+    size_t len;
+    std::vector<ChunkEntry> chunks;
+    seastar::shared_mutex mu;
+    Store* store;
+
+    Extent();
+    ~Extent();
+    ExtentEntry GetExtentEntry();
+};
+
+using ExtentPtr = seastar::lw_shared_ptr<Extent>;
+
 }  // namespace stream
 }  // namespace snail
 

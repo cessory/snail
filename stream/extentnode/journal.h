@@ -15,20 +15,27 @@
 
 namespace snail {
 namespace stream {
+class Store;
 
 class Journal {
+#ifdef EXTENTNODE_UT_TEST
+   public:
+#else
+   private:
+#endif
     DevicePtr dev_ptr_;
-    SuperBlock super_;
+    Store *store_;
+    ExtentEntry extent_;
+    std::optional<ChunkEntry> chunk_;  // current chunk for write journal
+    std::vector<ChunkEntry> archive_chunks_;
+    seastar::shared_mutex extent_mu_;
+    seastar::semaphore chunk_sem_;
 
     bool init_ = false;
-    uint64_t version_ = 0;
-    int current_pt_ = JOURNALA_PT;
-    uint64_t offset_;  // current offset
-
-    std::map<uint32_t, ChunkEntry> chunk_mem_;
-    std::map<uint32_t, ChunkEntry> immu_chunk_mem_;
-    std::map<uint32_t, ExtentEntry> extent_mem_;
-    std::map<uint32_t, ExtentEntry> immu_extent_mem_;
+    std::map<uint32_t, ChunkEntry> mutable_chunks_;
+    std::map<uint32_t, ExtentEntry> mutable_extents_;
+    std::queue<std::map<uint32_t, ChunkEntry>> immutable_chunks_;
+    std::queue<std::map<uint32_t, ExtentEntry>> immutable_extents_;
 
     struct worker_item {
         seastar::promise<Status<>> pr;
@@ -37,29 +44,40 @@ class Journal {
             return entry.index() == 0 ? kExtentEntrySize : kChunkEntrySize;
         }
 
-        void MarshalTo(uint64_t ver, char *b);
+        void MarshalTo(char *b);
     };
 
-    std::queue<worker_item *> queue_;
-    seastar::condition_variable cv_;
     Status<> status_;
     seastar::gate gate_;
     std::optional<seastar::future<>> loop_fu_;
+    std::optional<seastar::future<Status<>>> flush_fu_;
+    std::queue<worker_item *> queue_;
+    seastar::condition_variable cv_;
+    seastar::condition_variable flush_cv_;
 
     seastar::future<> LoopRun();
 
-    seastar::future<Status<>> SaveImmuChunks();
-    seastar::future<Status<>> SaveImmuExtents();
+    seastar::future<Status<int>> SaveImmuChunks(
+        std::queue<std::map<uint32_t, ChunkEntry>> immutable_chunks);
 
-    seastar::future<Status<>> BackgroundFlush(uint64_t ver,
-                                              uint64_t header_offset);
+    seastar::future<Status<int>> SaveImmuExtents(
+        std::queue<std::map<uint32_t, ExtentEntry>> immutable_extents);
+
+    seastar::future<Status<>> BackgroundFlush(bool once);
 
     void UpdateMem(const std::variant<ExtentEntry, ChunkEntry> &entry);
 
+    seastar::future<Status<>> AllocaChunk();
+
+    seastar::future<Status<>> ReleaseChunk(uint32_t n);
+
+    seastar::future<Status<>> Append(size_t pos, const char *p, size_t n);
+
    public:
-    explicit Journal(DevicePtr dev_ptr, const SuperBlock &super_block);
+    explicit Journal(DevicePtr dev_ptr, Store *store, size_t max_size);
 
     seastar::future<Status<>> Init(
+        ExtentPtr extent,
         seastar::noncopyable_function<Status<>(const ExtentEntry &)> &&f1,
         seastar::noncopyable_function<Status<>(const ChunkEntry &)> &&f2);
 

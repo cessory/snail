@@ -69,27 +69,22 @@ class Service {
     seastar::future<> Close();
 
     seastar::future<Status<>> HandleWriteExtent(const WriteExtentReq *req,
-                                                net::Stream *stream,
-                                                unsigned shard);
+                                                net::Stream *stream);
 
     seastar::future<Status<>> HandleReadExtent(const ReadExtentReq *req,
-                                               net::Stream *stream,
-                                               unsigned shard);
+                                               net::Stream *stream);
 
     seastar::future<Status<>> HandleCreateExtent(const CreateExtentReq *req,
-                                                 net::Stream *stream,
-                                                 unsigned shard);
+                                                 net::Stream *stream);
 
     seastar::future<Status<>> HandleDeleteExtent(const DeleteExtentReq *req,
-                                                 net::Stream *stream,
-                                                 unsigned shard);
+                                                 net::Stream *stream);
 
     seastar::future<Status<>> HandleGetExtent(const GetExtentReq *req,
-                                              net::Stream *stream,
-                                              unsigned shard);
+                                              net::Stream *stream);
 
     seastar::future<Status<>> HandleUpdateDiskStatus(
-        const UpdateDiskStatusReq *req, net::Stream *stream, unsigned shard);
+        const UpdateDiskStatusReq *req, net::Stream *stream);
 };
 
 using ServicePtr = seastar::lw_shared_ptr<Service>;

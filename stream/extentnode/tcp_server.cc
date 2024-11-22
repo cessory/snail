@@ -16,20 +16,10 @@ namespace stream {
 
 seastar::future<Status<>> TcpServer::SendResp(
     const ::google::protobuf::Message* resp, ExtentnodeMsgType msgType,
-    net::Stream* stream, unsigned shard_id) {
+    net::Stream* stream) {
     Buffer buf = MarshalRpcMessage(resp, (uint16_t)msgType);
     Status<> s;
-    if (shard_id == seastar::this_shard_id()) {
-        s = co_await stream->WriteFrame(buf.get(), buf.size());
-    } else {
-        s = co_await seastar::smp::submit_to(
-            shard_id,
-            [stream, b = buf.get(),
-             len = buf.size()]() -> seastar::future<Status<>> {
-                auto s = co_await stream->WriteFrame(b, len);
-                co_return s;
-            });
-    }
+    s = co_await stream->WriteFrame(buf.get(), buf.size());
     co_return s;
 }
 
@@ -169,23 +159,20 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 resp.set_reqid(((WriteExtentReq*)req.get())->header().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
                 resp.set_reason(s.Reason());
-                co_await SendResp(&resp, WRITE_EXTENT_RESP, stream.get(),
-                                  shard);
+                co_await SendResp(&resp, WRITE_EXTENT_RESP, stream.get());
                 co_return s;
             }
             service = it->second.get();
             if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleWriteExtent(
-                    (const WriteExtentReq*)req.get(), stream.get(), shard);
+                    (const WriteExtentReq*)req.get(), stream.get());
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
                     seastar::coroutine::lambda(
                         [service, r = (const WriteExtentReq*)req.get(),
-                         sm = stream.get(),
-                         shard]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleWriteExtent(r, sm,
-                                                                         shard);
+                         sm = stream.get()]() -> seastar::future<Status<>> {
+                            auto s = co_await service->HandleWriteExtent(r, sm);
                             co_return s;
                         }));
             }
@@ -208,7 +195,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                     ((ReadExtentReq*)req.get())->header().reqid());
                 resp.mutable_header()->set_code(static_cast<int>(s.Code()));
                 resp.mutable_header()->set_reason(s.Reason());
-                co_await SendResp(&resp, READ_EXTENT_RESP, stream.get(), shard);
+                co_await SendResp(&resp, READ_EXTENT_RESP, stream.get());
                 co_return s;
             }
             service = it->second.get();
@@ -216,7 +203,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
             service = it->second.get();
             if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleReadExtent(
-                    (const ReadExtentReq*)req.get(), stream.get(), shard);
+                    (const ReadExtentReq*)req.get(), stream.get());
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
@@ -224,8 +211,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                         [service, r = (const ReadExtentReq*)req.get(),
                          sm = stream.get(),
                          shard]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleReadExtent(r, sm,
-                                                                        shard);
+                            auto s = co_await service->HandleReadExtent(r, sm);
                             co_return s;
                         }));
             }
@@ -247,15 +233,14 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 resp.set_reqid(((CreateExtentReq*)req.get())->header().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
                 resp.set_reason(s.Reason());
-                co_await SendResp(&resp, CREATE_EXTENT_RESP, stream.get(),
-                                  shard);
+                co_await SendResp(&resp, CREATE_EXTENT_RESP, stream.get());
                 co_return s;
             }
 
             service = it->second.get();
             if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleCreateExtent(
-                    (const CreateExtentReq*)req.get(), stream.get(), shard);
+                    (const CreateExtentReq*)req.get(), stream.get());
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
@@ -263,8 +248,8 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                         [service, r = (const CreateExtentReq*)req.get(),
                          sm = stream.get(),
                          shard]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleCreateExtent(
-                                r, sm, shard);
+                            auto s =
+                                co_await service->HandleCreateExtent(r, sm);
                             co_return s;
                         }));
             }
@@ -286,15 +271,14 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                 resp.set_reqid(((DeleteExtentReq*)req.get())->header().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
                 resp.set_reason(s.Reason());
-                co_await SendResp(&resp, DELETE_EXTENT_RESP, stream.get(),
-                                  shard);
+                co_await SendResp(&resp, DELETE_EXTENT_RESP, stream.get());
                 co_return s;
             }
 
             service = it->second.get();
             if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleDeleteExtent(
-                    (const DeleteExtentReq*)req.get(), stream.get(), shard);
+                    (const DeleteExtentReq*)req.get(), stream.get());
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
@@ -302,8 +286,8 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                         [service, r = (const DeleteExtentReq*)req.get(),
                          sm = stream.get(),
                          shard]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleDeleteExtent(
-                                r, sm, shard);
+                            auto s =
+                                co_await service->HandleDeleteExtent(r, sm);
                             co_return s;
                         }));
             }
@@ -326,14 +310,14 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                     ((GetExtentReq*)req.get())->header().reqid());
                 resp.mutable_header()->set_code(static_cast<int>(s.Code()));
                 resp.mutable_header()->set_reason(s.Reason());
-                co_await SendResp(&resp, GET_EXTENT_RESP, stream.get(), shard);
+                co_await SendResp(&resp, GET_EXTENT_RESP, stream.get());
                 co_return s;
             }
 
             service = it->second.get();
             if (it->second.get_owner_shard() == seastar::this_shard_id()) {
                 s = co_await service->HandleGetExtent(
-                    (const GetExtentReq*)req.get(), stream.get(), shard);
+                    (const GetExtentReq*)req.get(), stream.get());
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
@@ -341,8 +325,7 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                         [service, r = (const GetExtentReq*)req.get(),
                          sm = stream.get(),
                          shard]() -> seastar::future<Status<>> {
-                            auto s =
-                                co_await service->HandleGetExtent(r, sm, shard);
+                            auto s = co_await service->HandleGetExtent(r, sm);
                             co_return s;
                         }));
             }
@@ -365,15 +348,14 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                     ((UpdateDiskStatusReq*)req.get())->header().reqid());
                 resp.set_code(static_cast<int>(s.Code()));
                 resp.set_reason(s.Reason());
-                co_await SendResp(&resp, UPDATE_DISK_STATUS_RESP, stream.get(),
-                                  shard);
+                co_await SendResp(&resp, UPDATE_DISK_STATUS_RESP, stream.get());
                 co_return s;
             }
 
             service = it->second.get();
             if (it->second.get_owner_shard() == shard) {
                 s = co_await service->HandleUpdateDiskStatus(
-                    (const UpdateDiskStatusReq*)req.get(), stream.get(), shard);
+                    (const UpdateDiskStatusReq*)req.get(), stream.get());
             } else {
                 s = co_await seastar::smp::submit_to(
                     it->second.get_owner_shard(),
@@ -381,8 +363,8 @@ seastar::future<Status<>> TcpServer::HandleMessage(
                         [service, r = (const UpdateDiskStatusReq*)req.get(),
                          sm = stream.get(),
                          shard]() -> seastar::future<Status<>> {
-                            auto s = co_await service->HandleUpdateDiskStatus(
-                                r, sm, shard);
+                            auto s =
+                                co_await service->HandleUpdateDiskStatus(r, sm);
                             co_return s;
                         }));
             }

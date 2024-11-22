@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "util/status.h"
+#include "util/util.h"
 
 namespace snail {
 namespace net {
@@ -22,7 +23,7 @@ struct Option {
 class BufferAllocator {
    public:
     virtual ~BufferAllocator() = default;
-    virtual seastar::temporary_buffer<char> Allocate(size_t len) = 0;
+    virtual Buffer Allocate(size_t len) = 0;
 };
 
 class Stream {
@@ -31,8 +32,7 @@ class Stream {
     virtual uint32_t ID() const = 0;
     virtual uint64_t SessID() const = 0;
     virtual uint32_t MaxFrameSize() const = 0;
-    virtual seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(
-        int timeout = -1) = 0;
+    virtual seastar::future<Status<Buffer>> ReadFrame(int timeout = -1) = 0;
     virtual seastar::future<Status<>> WriteFrame(const char *b, size_t n) = 0;
 
     virtual seastar::future<Status<>> WriteFrame(std::vector<iovec> iov) = 0;
@@ -40,7 +40,7 @@ class Stream {
     virtual seastar::future<Status<>> WriteFrame(
         seastar::temporary_buffer<char> b) = 0;
     virtual seastar::future<Status<>> WriteFrame(
-        std::vector<seastar::temporary_buffer<char>> buffers) = 0;
+        std::vector<Buffer> buffers) = 0;
 
     virtual std::string LocalAddress() const = 0;
 

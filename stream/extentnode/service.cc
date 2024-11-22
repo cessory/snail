@@ -16,8 +16,8 @@ namespace snail {
 namespace stream {
 
 static seastar::future<Status<>> SendCommonResp(
-    unsigned shard_id, net::Stream *stream, std::string_view reqid,
-    ExtentnodeMsgType msgType, ErrCode err, std::string reason,
+    net::Stream *stream, std::string_view reqid, ExtentnodeMsgType msgType,
+    ErrCode err, std::string reason,
     std::map<std::string, std::string> headers) {
     std::unique_ptr<::google::protobuf::Message> resp;
     Status<> s;
@@ -63,53 +63,50 @@ static seastar::future<Status<>> SendCommonResp(
     }
 
     if (resp) {
-        s = co_await TcpServer::SendResp(resp.get(), msgType, stream, shard_id);
+        s = co_await TcpServer::SendResp(resp.get(), msgType, stream);
     }
     co_return s;
 }
 
-static seastar::future<Status<>> SendCommonResp(unsigned shard_id,
-                                                net::Stream *stream,
+static seastar::future<Status<>> SendCommonResp(net::Stream *stream,
                                                 std::string_view reqid,
                                                 ExtentnodeMsgType msgType,
                                                 ErrCode err) {
-    return SendCommonResp(shard_id, stream, reqid, msgType, err, "",
+    return SendCommonResp(stream, reqid, msgType, err, "",
                           std::map<std::string, std::string>());
 }
 
-static seastar::future<Status<>> SendCommonResp(
-    unsigned shard_id, net::Stream *stream, std::string_view reqid,
-    ExtentnodeMsgType msgType, ErrCode err, std::string reason) {
-    auto s = co_await SendCommonResp(shard_id, stream, reqid, msgType, err,
-                                     std::move(reason),
-                                     std::map<std::string, std::string>());
+static seastar::future<Status<>> SendCommonResp(net::Stream *stream,
+                                                std::string_view reqid,
+                                                ExtentnodeMsgType msgType,
+                                                ErrCode err,
+                                                std::string reason) {
+    auto s =
+        co_await SendCommonResp(stream, reqid, msgType, err, std::move(reason),
+                                std::map<std::string, std::string>());
     co_return s;
 }
 
 static seastar::future<Status<>> SendCommonResp(
-    unsigned shard_id, net::Stream *stream, std::string_view reqid,
-    ExtentnodeMsgType msgType, ErrCode err,
-    std::map<std::string, std::string> headers) {
-    auto s = co_await SendCommonResp(shard_id, stream, reqid, msgType, err, "",
+    net::Stream *stream, std::string_view reqid, ExtentnodeMsgType msgType,
+    ErrCode err, std::map<std::string, std::string> headers) {
+    auto s = co_await SendCommonResp(stream, reqid, msgType, err, "",
                                      std::move(headers));
     co_return s;
 }
 
-static seastar::future<Status<>> SendReadExtentResp(unsigned shard_id,
-                                                    net::Stream *stream,
+static seastar::future<Status<>> SendReadExtentResp(net::Stream *stream,
                                                     std::string_view reqid,
                                                     uint64_t len) {
     std::unique_ptr<ReadExtentResp> resp(new ReadExtentResp);
     resp->mutable_header()->set_reqid(std::string(reqid.data(), reqid.size()));
     resp->mutable_header()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
-    auto s = co_await TcpServer::SendResp(resp.get(), READ_EXTENT_RESP, stream,
-                                          shard_id);
+    auto s = co_await TcpServer::SendResp(resp.get(), READ_EXTENT_RESP, stream);
     co_return s;
 }
 
-static seastar::future<Status<>> SendGetExtentResp(unsigned shard_id,
-                                                   net::Stream *stream,
+static seastar::future<Status<>> SendGetExtentResp(net::Stream *stream,
                                                    std::string_view reqid,
                                                    uint64_t len,
                                                    uint32_t ctime) {
@@ -118,14 +115,12 @@ static seastar::future<Status<>> SendGetExtentResp(unsigned shard_id,
     resp->mutable_header()->set_code(static_cast<int>(ErrCode::OK));
     resp->set_len(len);
     resp->set_ctime(ctime);
-    auto s = co_await TcpServer::SendResp(resp.get(), GET_EXTENT_RESP, stream,
-                                          shard_id);
+    auto s = co_await TcpServer::SendResp(resp.get(), GET_EXTENT_RESP, stream);
     co_return s;
 }
 
 seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
-                                                     net::Stream *stream,
-                                                     unsigned shard) {
+                                                     net::Stream *stream) {
     Status<> s;
 
     const std::string &reqid = req->header().reqid();
@@ -142,8 +137,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("reqid={} parse extent_id={} error", reqid, eid_str);
         s.Set(EINVAL);
-        co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                s.Code());
+        co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
 
@@ -152,8 +146,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
         LOG_ERROR("reqid={} extent_id={}-{} diskid={} devid={} error: {}",
                   reqid, extent_id.hi, extent_id.lo, diskid, store_->DeviceId(),
                   s);
-        co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                s.Code());
+        co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
 
@@ -162,8 +155,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
         s.Set(ErrCode::ErrExtentNotFound);
         LOG_ERROR("reqid={} extent_id={}-{} diskid={} error: {}", reqid,
                   extent_id.hi, extent_id.lo, diskid, s.String());
-        co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                s.Code());
+        co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
 
@@ -171,8 +163,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
         s.Set(ErrCode::ErrParallelWrite);
         LOG_ERROR("reqid={} extent_id={}-{} diskid={} error: {}", reqid,
                   extent_id.hi, extent_id.lo, diskid, s.String());
-        co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                s.Code());
+        co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
         co_return s;
     }
     auto defer = seastar::defer([extent_ptr] { extent_ptr->mu.unlock(); });
@@ -185,47 +176,21 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     size_t first_block_len = kBlockDataSize - off % kBlockDataSize;
 
     while (len > 0) {
-        Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>> st;
-        if (seastar::this_shard_id() == shard) {
-            auto st1 = co_await stream->ReadFrame();
-            st.Set(st1.Code(), st1.Reason());
-            if (st1) {
-                st.SetValue(seastar::make_foreign(std::unique_ptr<Buffer>(
-                    new Buffer(std::move(st1.Value())))));
-            }
-        } else {
-            st = co_await seastar::smp::submit_to(
-                shard,
-                [stream]()
-                    -> seastar::future<
-                        Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>>> {
-                    Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>> st;
-                    auto st1 = co_await stream->ReadFrame();
-                    st.Set(st1.Code(), st1.Reason());
-                    if (st1) {
-                        st.SetValue(
-                            seastar::make_foreign(std::unique_ptr<Buffer>(
-                                new Buffer(std::move(st1.Value())))));
-                    }
-                    co_return std::move(st);
-                });
-        }
+        auto st = co_await stream->ReadFrame();
         if (!st) {
             s.Set(st.Code(), st.Reason());
             LOG_ERROR(
                 "reqid={} extent_id={}-{} diskid={} read data frame error: {}",
                 reqid, extent_id.hi, extent_id.lo, diskid, s);
-            co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                    s.Code());
+            co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
             co_return s;
         }
-        auto b = foreign_buffer_copy(std::move(st.Value()));
+        auto b = std::move(st.Value());
         if (b.size() <= 4) {
             LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
                       reqid, extent_id.hi, extent_id.lo, diskid);
             s.Set(EBADMSG);
-            co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                    s.Code());
+            co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
             co_return s;
         }
         size_t data_len = 0;
@@ -238,7 +203,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
                 LOG_ERROR("reqid={} extent_id={}-{} diskid={} data too short",
                           reqid, extent_id.hi, extent_id.lo, diskid);
                 s.Set(EBADMSG);
-                co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
+                co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP,
                                         s.Code());
                 co_return s;
             }
@@ -251,7 +216,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
                     "checksum n={}",
                     reqid, extent_id.hi, extent_id.lo, diskid, n);
                 s.Set(ErrCode::ErrInvalidChecksum);
-                co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
+                co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP,
                                         s.Code());
                 co_return s;
             }
@@ -262,8 +227,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             LOG_ERROR("reqid={} extent_id={}-{} diskid={} invalid len", reqid,
                       extent_id.hi, extent_id.lo, diskid);
             s.Set(EBADMSG);
-            co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                    s.Code());
+            co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
             co_return s;
         }
         len -= data_len;
@@ -271,8 +235,8 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
             if (fu) {
                 s = co_await std::move(fu.value());
                 if (!s) {
-                    co_await SendCommonResp(shard, stream, reqid,
-                                            WRITE_EXTENT_RESP, s.Code());
+                    co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP,
+                                            s.Code());
                     co_return s;
                 }
                 off += sent;
@@ -290,8 +254,7 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
     if (fu) {
         s = co_await std::move(fu.value());
         if (!s) {
-            co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                    s.Code());
+            co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
             co_return s;
         }
         fu.reset();
@@ -302,18 +265,18 @@ seastar::future<Status<>> Service::HandleWriteExtent(const WriteExtentReq *req,
         s = co_await store_->Write(extent_ptr, off, std::move(buffers));
     }
     if (s) {
-        s = co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
     } else {
-        co_await SendCommonResp(shard, stream, reqid, WRITE_EXTENT_RESP,
-                                s.Code());
+        co_await SendCommonResp(stream, reqid, WRITE_EXTENT_RESP, s.Code());
     }
     co_return s;
 }
 
-static seastar::future<Status<>> WriteFrames(
-    unsigned shard, net::Stream *stream, std::vector<Buffer> buffers,
-    bool first, bool last, size_t trim_front_len, size_t trim_len) {
+static seastar::future<Status<>> WriteFrames(net::Stream *stream,
+                                             std::vector<Buffer> buffers,
+                                             bool first, bool last,
+                                             size_t trim_front_len,
+                                             size_t trim_len) {
     Status<> s;
     int n = buffers.size();
     std::vector<Buffer> send_frame;
@@ -375,12 +338,7 @@ static seastar::future<Status<>> WriteFrames(
         }
     }
 
-    if (shard == seastar::this_shard_id()) {
-        s = co_await stream->WriteFrame(std::move(iov));
-    } else {
-        s = co_await seastar::smp::submit_to(
-            shard, [&iov, stream] { return stream->WriteFrame(iov); });
-    }
+    s = co_await stream->WriteFrame(std::move(iov));
 
     co_return s;
 }
@@ -394,8 +352,7 @@ seastar::future<> Service::Close() {
 }
 
 seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
-                                                    net::Stream *stream,
-                                                    unsigned shard) {
+                                                    net::Stream *stream) {
     Status<> s;
 
     const std::string &reqid = req->header().reqid();
@@ -412,29 +369,25 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
     ExtentID extent_id;
     if (!extent_id.Parse(req->extent_id())) {
         s.Set(EINVAL);
-        s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, READ_EXTENT_RESP, s.Code());
         co_return s;
     }
 
     if (diskid != store_->DeviceId()) {
         s.Set(ENODEV);
-        s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, READ_EXTENT_RESP, s.Code());
         co_return s;
     }
     auto extent_ptr = store_->GetExtent(extent_id);
     if (!extent_ptr) {
         s.Set(ErrCode::ErrExtentNotFound);
-        s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, READ_EXTENT_RESP, s.Code());
         co_return s;
     }
 
     if (off > extent_ptr->len) {
         s.Set(EINVAL);
-        s = co_await SendCommonResp(shard, stream, reqid, READ_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, READ_EXTENT_RESP, s.Code());
         co_return s;
     }
 
@@ -442,7 +395,7 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
         len = extent_ptr->len - off;
     }
 
-    s = co_await SendReadExtentResp(shard, stream, reqid, len);
+    s = co_await SendReadExtentResp(stream, reqid, len);
     if (!s) {
         co_return s;
     }
@@ -531,7 +484,7 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
             }
 
             fu =
-                WriteFrames(shard, stream, std::move(buffers), first,
+                WriteFrames(stream, std::move(buffers), first,
                             (len == 0 && bytes == 0), trim_front_len, trim_len);
             first = false;
             read_off = off;
@@ -546,7 +499,7 @@ seastar::future<Status<>> Service::HandleReadExtent(const ReadExtentReq *req,
 }
 
 seastar::future<Status<>> Service::HandleCreateExtent(
-    const CreateExtentReq *req, net::Stream *stream, unsigned shard) {
+    const CreateExtentReq *req, net::Stream *stream) {
     Status<> s;
 
     const std::string &reqid = req->header().reqid();
@@ -560,25 +513,24 @@ seastar::future<Status<>> Service::HandleCreateExtent(
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("{} parse extent id error", reqid);
         s.Set(EINVAL);
-        s = co_await SendCommonResp(shard, stream, reqid, CREATE_EXTENT_RESP,
+        s = co_await SendCommonResp(stream, reqid, CREATE_EXTENT_RESP,
                                     s.Code());
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
         s.Set(ENODEV);
-        s = co_await SendCommonResp(shard, stream, reqid, CREATE_EXTENT_RESP,
+        s = co_await SendCommonResp(stream, reqid, CREATE_EXTENT_RESP,
                                     s.Code());
         co_return s;
     }
 
     s = co_await store_->CreateExtent(extent_id);
-    s = co_await SendCommonResp(shard, stream, reqid, CREATE_EXTENT_RESP,
-                                s.Code());
+    s = co_await SendCommonResp(stream, reqid, CREATE_EXTENT_RESP, s.Code());
     co_return s;
 }
 
 seastar::future<Status<>> Service::HandleDeleteExtent(
-    const DeleteExtentReq *req, net::Stream *stream, unsigned shard) {
+    const DeleteExtentReq *req, net::Stream *stream) {
     Status<> s;
 
     const std::string &reqid = req->header().reqid();
@@ -592,26 +544,24 @@ seastar::future<Status<>> Service::HandleDeleteExtent(
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("{} parse extent id error", reqid);
         s.Set(EINVAL);
-        s = co_await SendCommonResp(shard, stream, reqid, DELETE_EXTENT_RESP,
+        s = co_await SendCommonResp(stream, reqid, DELETE_EXTENT_RESP,
                                     s.Code());
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
         s.Set(ENODEV);
-        s = co_await SendCommonResp(shard, stream, reqid, DELETE_EXTENT_RESP,
+        s = co_await SendCommonResp(stream, reqid, DELETE_EXTENT_RESP,
                                     s.Code());
         co_return s;
     }
 
     s = co_await store_->RemoveExtent(extent_id);
-    s = co_await SendCommonResp(shard, stream, reqid, DELETE_EXTENT_RESP,
-                                s.Code());
+    s = co_await SendCommonResp(stream, reqid, DELETE_EXTENT_RESP, s.Code());
     co_return s;
 }
 
 seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
-                                                   net::Stream *stream,
-                                                   unsigned shard) {
+                                                   net::Stream *stream) {
     Status<> s;
 
     const std::string &reqid = req->header().reqid();
@@ -625,16 +575,14 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
     if (!extent_id.Parse(req->extent_id())) {
         LOG_ERROR("{} parse extent id error", reqid);
         s.Set(EINVAL);
-        s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, GET_EXTENT_RESP, s.Code());
         co_return s;
     }
     if (diskid != store_->DeviceId()) {
         s.Set(ENODEV);
         LOG_ERROR("{} get extent={} error: {}, diskid={}", reqid, extent_id, s,
                   diskid);
-        s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, GET_EXTENT_RESP, s.Code());
         co_return s;
     }
 
@@ -642,18 +590,17 @@ seastar::future<Status<>> Service::HandleGetExtent(const GetExtentReq *req,
     if (!extent_ptr) {
         s.Set(ErrCode::ErrExtentNotFound);
         LOG_ERROR("{} get extent={} error: {}", reqid, extent_id, s);
-        s = co_await SendCommonResp(shard, stream, reqid, GET_EXTENT_RESP,
-                                    s.Code());
+        s = co_await SendCommonResp(stream, reqid, GET_EXTENT_RESP, s.Code());
         co_return s;
     }
 
-    s = co_await SendGetExtentResp(shard, stream, reqid, extent_ptr->len,
+    s = co_await SendGetExtentResp(stream, reqid, extent_ptr->len,
                                    extent_ptr->ctime);
     co_return s;
 }
 
 seastar::future<Status<>> Service::HandleUpdateDiskStatus(
-    const UpdateDiskStatusReq *req, net::Stream *stream, unsigned shard) {
+    const UpdateDiskStatusReq *req, net::Stream *stream) {
     Status<> s;
 
     const std::string &reqid = req->header().reqid();
@@ -666,19 +613,19 @@ seastar::future<Status<>> Service::HandleUpdateDiskStatus(
     seastar::gate::holder holder(gate_);
     if (diskid != store_->DeviceId()) {
         s.Set(ENODEV);
-        s = co_await SendCommonResp(shard, stream, reqid,
-                                    UPDATE_DISK_STATUS_RESP, s.Code());
+        s = co_await SendCommonResp(stream, reqid, UPDATE_DISK_STATUS_RESP,
+                                    s.Code());
         co_return s;
     }
     if (status >= static_cast<uint32_t>(DevStatus::MAX)) {
         s.Set(EINVAL);
-        s = co_await SendCommonResp(shard, stream, reqid,
-                                    UPDATE_DISK_STATUS_RESP, s.Code());
+        s = co_await SendCommonResp(stream, reqid, UPDATE_DISK_STATUS_RESP,
+                                    s.Code());
         co_return s;
     }
 
     store_->SetStatus(static_cast<DevStatus>(status));
-    s = co_await SendCommonResp(shard, stream, reqid, UPDATE_DISK_STATUS_RESP,
+    s = co_await SendCommonResp(stream, reqid, UPDATE_DISK_STATUS_RESP,
                                 s.Code());
     co_return s;
 }

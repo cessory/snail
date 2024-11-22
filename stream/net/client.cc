@@ -3,6 +3,7 @@
 #include <seastar/core/internal/pollable_fd.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/when_all.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/net/api.hh>
 #include <seastar/net/dns.hh>
 
@@ -32,12 +33,17 @@ seastar::future<> Client::RecyleLoop() {
 
     seastar::gate::holder holder(gate_);
     while (!gate_.is_closed()) {
-        if (recyle_list_.empty()) {
+        if (recyle_q_.empty()) {
             co_await recyle_cv_.wait();
             continue;
         }
-        for (auto iter = recyle_list_.begin(); iter != recyle_list_.end();) {
-            SessionImplPtr impl = *iter;
+
+        std::queue<SessionImplPtr> tmp_recyle_q;
+        tmp_recyle_q.swap(recyle_q_);
+
+        while (!tmp_recyle_q.empty()) {
+            SessionImplPtr impl = tmp_recyle_q.front();
+            tmp_recyle_q.pop();
             std::vector<seastar::future<>> fu_vec;
             while (!impl->streams_.empty()) {
                 auto stream = impl->streams_.front();
@@ -51,10 +57,10 @@ seastar::future<> Client::RecyleLoop() {
             }
             if (impl->sess_->Streams() == 0 || !impl->sess_->Valid()) {
                 co_await impl->sess_->Close();
-                recyle_list_.erase(iter++);
             } else {
-                iter++;
+                recyle_q_.push(impl);
             }
+            co_await seastar::coroutine::maybe_yield();
         }
 
         if (gate_.is_closed()) {
@@ -96,7 +102,7 @@ seastar::future<Status<StreamPtr>> Client::Get() {
 
     co_await mu_.lock();
     if (sess_impl_ && old_sess_id != sess_impl_->sess_->ID()) {
-        recyle_list_.push_back(sess_impl_);
+        recyle_q_.push(sess_impl_);
         sess_impl_ = nullptr;
         recyle_cv_.signal();
     } else if (sess_impl_) {
@@ -166,10 +172,10 @@ seastar::future<> Client::Close() {
         co_await sess_impl_->sess_->Close();
     }
 
-    for (auto iter = recyle_list_.begin(); iter != recyle_list_.end();) {
-        SessionImplPtr impl = *iter;
+    while (!recyle_q_.empty()) {
+        SessionImplPtr impl = recyle_q_.front();
+        recyle_q_.pop();
         co_await impl->sess_->Close();
-        recyle_list_.erase(iter++);
     }
     co_return;
 }

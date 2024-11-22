@@ -32,8 +32,7 @@ uint64_t TcpStream::SessID() const { return sess_->ID(); }
 
 bool TcpStream::Valid() const { return !gate_.is_closed() && sess_->Valid(); }
 
-seastar::future<Status<seastar::temporary_buffer<char>>> TcpStream::ReadFrame(
-    int timeout) {
+seastar::future<Status<Buffer>> TcpStream::read_frame(int timeout) {
     Status<seastar::temporary_buffer<char>> s;
     if (gate_.is_closed()) {
         s.Set(EPIPE);
@@ -135,10 +134,45 @@ seastar::future<Status<>> TcpStream::SendWindowUpdate(uint32_t consumed) {
     return sess_->WriteFrameInternal(std::move(f), TcpSession::ClassID::DATA);
 }
 
+seastar::future<Status<Buffer>> TcpStream::ReadFrame(int timeout) {
+    if (shard_ == seastar::this_shard_id()) {
+        auto s = co_await read_frame(timeout);
+        co_return s;
+    }
+
+    Status<Buffer> s;
+    Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>> st;
+    st = co_await seastar::smp::submit_to(
+        shard_,
+        seastar::coroutine::lambda(
+            [this, timeout]()
+                -> seastar::future<
+                    Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>>> {
+                Status<seastar::foreign_ptr<std::unique_ptr<Buffer>>> s;
+                auto st = co_await read_frame(timeout);
+                if (!st) {
+                    s.Set(st.Code(), st.Reason());
+                    co_return s;
+                }
+                std::unique_ptr<Buffer> b =
+                    std::make_unique<Buffer>(std::move(st.Value()));
+                s.SetValue(seastar::make_foreign<std::unique_ptr<Buffer>>(
+                    std::move(b)));
+                co_return s;
+            }));
+    if (!st) {
+        s.Set(st.Code(), st.Reason());
+        co_return s;
+    }
+    s.SetValue(foreign_buffer_copy(std::move(st.Value())));
+    co_return s;
+}
+
 seastar::future<Status<>> TcpStream::WriteFrame(std::vector<iovec> iov) {
     return seastar::smp::submit_to(
         shard_,
-        [this, iov = std::move(iov)]() mutable -> seastar::future<Status<>> {
+        seastar::coroutine::lambda([this, iov = std::move(iov)]() mutable
+                                   -> seastar::future<Status<>> {
             Status<> s;
 
             if (gate_.is_closed() || has_fin_) {
@@ -187,7 +221,7 @@ seastar::future<Status<>> TcpStream::WriteFrame(std::vector<iovec> iov) {
             s = co_await sess_->WriteFrameInternal(std::move(frame),
                                                    TcpSession::ClassID::DATA);
             co_return s;
-        });
+        }));
 }
 
 seastar::future<Status<>> TcpStream::WriteFrame(const char *b, size_t n) {
@@ -234,26 +268,28 @@ std::string TcpStream::LocalAddress() const { return sess_->LocalAddress(); }
 std::string TcpStream::RemoteAddress() const { return sess_->RemoteAddress(); }
 
 seastar::future<> TcpStream::Close() {
-    return seastar::smp::submit_to(shard_, [this]() -> seastar::future<> {
-        if (!gate_.is_closed()) {
-            auto fu = gate_.close();
-            r_cv_.signal();
-            wnd_cv_.broadcast();
-            Frame frame;
-            frame.ver = ver_;
-            frame.cmd = CmdType::FIN;
-            frame.sid = id_;
-            co_await sess_->WriteFrameInternal(std::move(frame),
-                                               TcpSession::ClassID::CTRL);
-            if (buffer_size_ > 0) {
-                sess_->ReturnTokens(buffer_size_);
-                buffer_size_ = 0;
+    co_await seastar::smp::submit_to(
+        shard_, seastar::coroutine::lambda([this]() -> seastar::future<> {
+            if (!gate_.is_closed()) {
+                auto fu = gate_.close();
+                r_cv_.signal();
+                wnd_cv_.broadcast();
+                Frame frame;
+                frame.ver = ver_;
+                frame.cmd = CmdType::FIN;
+                frame.sid = id_;
+                co_await sess_->WriteFrameInternal(std::move(frame),
+                                                   TcpSession::ClassID::CTRL);
+                if (buffer_size_ > 0) {
+                    sess_->ReturnTokens(buffer_size_);
+                    buffer_size_ = 0;
+                }
+                sess_->streams_.erase(id_);
+                co_await std::move(fu);
             }
-            sess_->streams_.erase(id_);
-            co_await std::move(fu);
-        }
-        co_return;
-    });
+            co_return;
+        }));
+    co_return;
 }
 
 }  // namespace net

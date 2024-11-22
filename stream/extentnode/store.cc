@@ -172,7 +172,8 @@ static seastar::future<Status<std::map<uint32_t, ChunkEntry>>> LoadChunks(
 }
 
 seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
-                                      size_t cache_cap) {
+                                      size_t cache_cap,
+                                      size_t journal_max_size) {
     StorePtr store = seastar::make_lw_shared<Store>(cache_cap);
     DevicePtr dev_ptr;
     LOG_INFO("load device={}...", name);
@@ -234,12 +235,13 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
     std::map<uint32_t, ChunkEntry> chunk_ht;
 
     auto s1 =
-        co_await LoadExtents(name, dev_ptr, super_block.pt[EXTENT_PT].start,
-                             super_block.pt[EXTENT_PT].size);
+        co_await LoadExtents(name, dev_ptr, super_block.ExtentMetaOffset(),
+                             super_block.ExtentMetaSize());
     if (!s1.OK()) {
         co_await dev_ptr->Close();
         co_return nullptr;
     }
+    LOG_INFO("load extents from device {} success", name);
     extent_ht = std::move(s1.Value());
 
     auto s2 = co_await LoadChunks(name, dev_ptr, super_block.pt[CHUNK_PT].start,
@@ -248,33 +250,58 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
         co_await dev_ptr->Close();
         co_return nullptr;
     }
+    LOG_INFO("load chunks from device {} success", name);
     chunk_ht = std::move(s2.Value());
+    // load journal extent, the extent that index is 0 is journal extent
+    ExtentPtr journal_extent = extent_ht[0];
+    extent_ht.erase(0);
+    uint32_t next = journal_extent->chunk_idx;
+    while (next != -1) {
+        auto it = chunk_ht.find(next);
+        if (it == chunk_ht.end()) {
+            LOG_ERROR(
+                "invalid next({}) chunk index for journal extent on device {}",
+                next, dev_ptr->Name());
+            co_await store->Close();
+            co_return nullptr;
+        }
+        store->used_ += kChunkSize;
+        journal_extent->chunks.push_back(it->second);
+        journal_extent->len += kChunkSize;
+        next = it->second.next;
+        chunk_ht.erase(it);
+    }
 
-    JournalPtr journal_ptr =
-        seastar::make_lw_shared<Journal>(dev_ptr, super_block);
+    JournalPtr journal_ptr = seastar::make_lw_shared<Journal>(
+        dev_ptr, store.get(), journal_max_size);
     auto s3 = co_await journal_ptr->Init(
-        [&extent_ht](const ExtentEntry& ext) -> Status<> {
+        journal_extent,
+        [&extent_ht, name](const ExtentEntry& ext) -> Status<> {
             Status<> s;
             auto iter = extent_ht.find(ext.index);
             if (iter == extent_ht.end()) {
                 s.Set(ErrCode::ErrInternal, "not found extent index");
                 return s;
             }
-            LOG_DEBUG("load a extent from journal extent-{} index={}", ext.id,
-                      ext.index);
+            LOG_DEBUG(
+                "load a extent [id: {} index: {}] from journal on device {}",
+                ext.id, ext.index, name);
             auto extent_ptr = iter->second;
             extent_ptr->id = ext.id;
             extent_ptr->chunk_idx = ext.chunk_idx;
             return s;
         },
-        [&chunk_ht](const ChunkEntry& chunk) -> Status<> {
+        [&chunk_ht, name](const ChunkEntry& chunk) -> Status<> {
             Status<> s;
             if (chunk_ht.count(chunk.index) != 1) {
                 s.Set(ErrCode::ErrInternal, "not found chunk index");
                 return s;
             }
-            LOG_DEBUG("load a chunk from journal index={} next={} len={}",
-                      chunk.index, (int)chunk.next, chunk.len);
+            LOG_DEBUG(
+                "load a chunk [index: {} next: {} len: {}] from journal on "
+                "device "
+                "{}",
+                chunk.index, (int)chunk.next, chunk.len, name);
             chunk_ht[chunk.index] = chunk;
             return s;
         });
@@ -305,7 +332,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
             next = it->second.next;
             chunk_ht.erase(it);
         }
-        extent_ptr->store = store;
+        extent_ptr->store = store.get();
         store->extents_[extent_ptr->id] = extent_ptr;
     }
 
@@ -318,7 +345,7 @@ seastar::future<StorePtr> Store::Load(std::string_view name, bool spdk_nvme,
 
 seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
                                     DevType dev_type, uint32_t dev_id,
-                                    uint64_t journal_cap, uint64_t capacity) {
+                                    uint64_t capacity) {
     DevicePtr dev_ptr;
     switch (dev_type) {
         case DevType::HDD:
@@ -347,38 +374,30 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
         co_return false;
     }
 
-    journal_cap = seastar::align_down(journal_cap, kChunkSize);
     capacity = seastar::align_down(capacity, kChunkSize);
-    if (journal_cap == 0 || capacity == 0 ||
-        (kChunkSize + 2 * journal_cap) >= capacity) {
-        LOG_ERROR(
-            "device {} capacity: {} journal_cap: {} capacity is too small",
-            name, capacity, journal_cap);
+    if (capacity <= kChunkSize) {
+        LOG_ERROR("device {} capacity {} is too small", name, capacity);
         co_await dev_ptr->Close();
         co_return false;
     }
-
-    size_t chunk_n =
-        (capacity - kChunkSize - 2 * journal_cap) / (kChunkSize + 1024);
+    size_t chunk_n = (capacity - kChunkSize) / kChunkSize;
     if (chunk_n == 0) {
-        LOG_ERROR("device {} capacity: {} journal_cap: {} not enough chunks",
-                  name, capacity, journal_cap);
+        LOG_ERROR("device {} capacity {} not enough chunks", name, capacity);
         co_await dev_ptr->Close();
         co_return false;
     }
     size_t extent_meta_size =
         seastar::align_up(chunk_n * kSectorSize, kChunkSize);
     size_t chunk_meta_size = extent_meta_size;
-    if (capacity <= kChunkSize + 2 * chunk_meta_size + 2 * journal_cap) {
+    if (capacity <= kChunkSize + extent_meta_size + chunk_meta_size) {
         LOG_ERROR(
-            "device {} capacity: {} journal_cap: {} extent_meta_size: {} "
+            "device {} capacity: {} extent_meta_size: {} "
             "chunk_meta_size: {} capacity is too small",
-            name, capacity, journal_cap, extent_meta_size, chunk_meta_size);
+            name, capacity, extent_meta_size, chunk_meta_size);
         co_await dev_ptr->Close();
         co_return false;
     }
-    size_t data_size =
-        capacity - kChunkSize - 2 * chunk_meta_size - 2 * journal_cap;
+    size_t data_size = capacity - kChunkSize - 2 * chunk_meta_size;
 
     SuperBlock super_block;
     super_block.magic = kMagic;
@@ -393,31 +412,23 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
     super_block.pt[CHUNK_PT].start =
         super_block.pt[EXTENT_PT].start + super_block.pt[EXTENT_PT].size;
     super_block.pt[CHUNK_PT].size = chunk_meta_size;
-    super_block.pt[JOURNALA_PT].start =
-        super_block.pt[CHUNK_PT].start + super_block.pt[CHUNK_PT].size;
-    super_block.pt[JOURNALA_PT].size = journal_cap;
-    super_block.pt[JOURNALB_PT].start =
-        super_block.pt[JOURNALA_PT].start + super_block.pt[JOURNALA_PT].size;
-    super_block.pt[JOURNALB_PT].size = journal_cap;
     super_block.pt[DATA_PT].start =
-        super_block.pt[JOURNALB_PT].start + super_block.pt[JOURNALB_PT].size;
+        super_block.pt[CHUNK_PT].start + super_block.pt[CHUNK_PT].size;
     super_block.pt[DATA_PT].size = data_size;
 
     LOG_INFO(
         "Format device {} capacity: {} extent_meta: (start={} size={}) "
-        "chunk_meta: (start={} size={}) journala: (start={} size={}) journalb: "
-        "(start={} size={}) data: (start={}, size={})",
+        "chunk_meta: (start={} size={}) "
+        "data: (start={}, size={})",
         name, capacity, super_block.pt[EXTENT_PT].start,
         super_block.pt[EXTENT_PT].size, super_block.pt[CHUNK_PT].start,
-        super_block.pt[CHUNK_PT].size, super_block.pt[JOURNALA_PT].start,
-        super_block.pt[JOURNALA_PT].size, super_block.pt[JOURNALB_PT].start,
-        super_block.pt[JOURNALB_PT].size, super_block.pt[DATA_PT].start,
+        super_block.pt[CHUNK_PT].size, super_block.pt[DATA_PT].start,
         super_block.pt[DATA_PT].size);
     // format extent meta
     auto buffer = dev_ptr->Get(kBlockSize);
     uint32_t index = 0;
-    for (uint64_t off = super_block.pt[EXTENT_PT].start;
-         off < super_block.pt[EXTENT_PT].start + super_block.pt[EXTENT_PT].size;
+    for (uint64_t off = super_block.ExtentMetaOffset();
+         off < super_block.ExtentMetaOffset() + super_block.ExtentMetaSize();
          off += kBlockSize) {
         int sector_n = kBlockSize / kSectorSize;
         for (int i = 0; i < sector_n; i++) {
@@ -468,21 +479,6 @@ seastar::future<bool> Store::Format(std::string_view name, uint32_t cluster_id,
         }
     }
     LOG_INFO("device {} format chunk meta success!", name);
-
-    // format loga and logb
-    memset(buffer.get_write(), 0, buffer.size());
-    for (uint64_t off = super_block.pt[JOURNALA_PT].start;
-         off <
-         super_block.pt[JOURNALB_PT].start + super_block.pt[JOURNALB_PT].size;
-         off += kBlockSize) {
-        auto s = co_await dev_ptr->Write(off, buffer.get(), buffer.size());
-        if (!s.OK()) {
-            LOG_ERROR("device {} format journal error: {}", name, s.String());
-            co_await dev_ptr->Close();
-            co_return false;
-        }
-    }
-    LOG_INFO("device {} format journal success!", name);
 
     // format superblock
     net::BigEndian::PutUint16(buffer.get_write() + 4, kSuperBlockSize);
@@ -606,12 +602,47 @@ seastar::future<Status<std::string>> Store::GetLastSectorData(
     co_return s;
 }
 
+seastar::future<Status<>> Store::SaveExtentMeta(const ExtentEntry& ent) {
+    Status<> s;
+    Buffer buf = dev_ptr_->Get(kSectorSize);
+    char* b = buf.get_write();
+
+    net::BigEndian::PutUint16(b + 4, kExtentEntrySize);
+    ent.MarshalTo(b + 6);
+    net::BigEndian::PutUint32(
+        b, crc32_gzip_refl(0, reinterpret_cast<const unsigned char*>(b + 4),
+                           kExtentEntrySize + 2));
+    size_t pos = super_block_.ExtentMetaOffset() + ent.index * kSectorSize;
+    s = co_await dev_ptr_->Write(pos, b, kSectorSize);
+    co_return s;
+}
+
+seastar::future<Status<>> Store::SaveChunkMeta(const ChunkEntry& ent) {
+    Status<> s;
+    Buffer buf = dev_ptr_->Get(kSectorSize);
+    char* b = buf.get_write();
+
+    net::BigEndian::PutUint16(b + 4, kChunkEntrySize);
+    ent.MarshalTo(b + 6);
+    net::BigEndian::PutUint32(
+        b, crc32_gzip_refl(0, reinterpret_cast<const unsigned char*>(b + 4),
+                           kChunkEntrySize + 2));
+    size_t pos = super_block_.ChunkMetaOffset() + ent.index * kSectorSize;
+    s = co_await dev_ptr_->Write(pos, b, kSectorSize);
+    co_return s;
+}
+
 seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
     Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(ENODEV);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
 
     if (creating_extents_.count(id) == 1 || extents_.count(id) == 1) {
         s.Set(ErrCode::ErrExistExtent);
-        LOG_ERROR("extent-{}-{} has already exist", id.hi, id.lo);
+        LOG_ERROR("extent-{} has already exist", id);
         co_return s;
     }
 
@@ -619,7 +650,7 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
     auto defer = seastar::defer([this, &id] { creating_extents_.erase(id); });
 
     ExtentPtr extent_ptr = seastar::make_lw_shared<Extent>();
-    extent_ptr->store = shared_from_this();
+    extent_ptr->store = this;
     if (free_extents_.empty() || free_chunks_.empty()) {
         s.Set(ENOSPC);
         LOG_ERROR("there is not enouth space to create extent-{}-{}", id.hi,
@@ -631,9 +662,10 @@ seastar::future<Status<>> Store::CreateExtent(ExtentID id) {
     free_extents_.pop();
     extent_ptr->id = id;
 
-    s = co_await AllocChunk(extent_ptr);
+    s = co_await journal_ptr_->SaveExtent(extent_ptr->GetExtentEntry());
     if (!s.OK()) {
-        LOG_ERROR("create extent-{}-{} error: {}", id.hi, id.lo, s.String());
+        LOG_ERROR("create extent-{} error: {}", id, s.String());
+        // extent release resource in destructor
         co_return s;
     }
     extents_[id] = extent_ptr;
@@ -789,6 +821,11 @@ Status<> Store::HandleIO(ChunkEntry& chunk, char* b, size_t len, bool first,
 seastar::future<Status<>> Store::Write(ExtentPtr extent_ptr, uint64_t offset,
                                        std::vector<iovec> iov) {
     Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(ENODEV);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     if (offset != extent_ptr->len) {
         LOG_ERROR("extent={} is over write, offset={} len={}", extent_ptr->id,
                   offset, extent_ptr->len);
@@ -944,6 +981,12 @@ seastar::future<Status<std::vector<Buffer>>> Store::Read(ExtentPtr extent_ptr,
     Status<std::vector<Buffer>> s;
     std::vector<Buffer> result;
 
+    if (gate_.is_closed()) {
+        s.Set(ENODEV);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
+
     if (off % kBlockDataSize) {
         LOG_ERROR("invalid arguments off={} is not align kBlockDataSize", off);
         s.Set(EINVAL);
@@ -1054,6 +1097,11 @@ seastar::future<Status<std::vector<Buffer>>> Store::Read(ExtentPtr extent_ptr,
 
 seastar::future<Status<>> Store::RemoveExtent(ExtentID id) {
     Status<> s;
+    if (gate_.is_closed()) {
+        s.Set(ENODEV);
+        co_return s;
+    }
+    seastar::gate::holder holder(gate_);
     auto iter = extents_.find(id);
     if (iter == extents_.end()) {
         s.Set(ErrCode::ErrExtentNotFound);
@@ -1091,6 +1139,10 @@ ExtentPtr Store::GetExtent(const ExtentID& id) {
 }
 
 seastar::future<> Store::Close() {
+    if (gate_.is_closed()) {
+        co_return;
+    }
+    co_await gate_.close();
     if (journal_ptr_) {
         co_await journal_ptr_->Close();
         journal_ptr_.release();

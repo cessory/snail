@@ -24,7 +24,7 @@ class Client {
     using SessionImplPtr = seastar::lw_shared_ptr<SessionImpl>;
 
     SessionImplPtr sess_impl_;
-    std::list<SessionImplPtr> recyle_list_;
+    std::queue<SessionImplPtr> recyle_q_;
     seastar::condition_variable recyle_cv_;
     seastar::gate gate_;
 

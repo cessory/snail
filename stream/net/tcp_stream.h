@@ -58,6 +58,8 @@ class TcpStream : public Stream {
 
     void Update(uint32_t consumed, uint32_t window);
 
+    seastar::future<Status<Buffer>> read_frame(int timeout);
+
    public:
     explicit TcpStream(uint32_t id, uint8_t ver, uint32_t frame_size,
                        TcpSession* sess);
@@ -75,16 +77,15 @@ class TcpStream : public Stream {
 
     uint32_t MaxFrameSize() const { return frame_size_; }
 
-    seastar::future<Status<seastar::temporary_buffer<char>>> ReadFrame(
-        int timeout = -1);
+    seastar::future<Status<Buffer>> ReadFrame(int timeout = -1);
 
     seastar::future<Status<>> WriteFrame(const char* b, size_t n);
 
     seastar::future<Status<>> WriteFrame(std::vector<iovec> iov);
 
-    seastar::future<Status<>> WriteFrame(seastar::temporary_buffer<char> b);
-    seastar::future<Status<>> WriteFrame(
-        std::vector<seastar::temporary_buffer<char>> buffers);
+    seastar::future<Status<>> WriteFrame(Buffer b);
+
+    seastar::future<Status<>> WriteFrame(std::vector<Buffer> buffers);
 
     std::string LocalAddress() const;
 

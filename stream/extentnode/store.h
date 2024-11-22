@@ -4,6 +4,7 @@
 #include <queue>
 #include <seastar/core/file.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include <seastar/core/shared_mutex.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
@@ -22,22 +23,14 @@
 namespace snail {
 namespace stream {
 
-class Store;
 using StorePtr = seastar::lw_shared_ptr<Store>;
 
-struct Extent : public ExtentEntry {
-    size_t len;
-    std::vector<ChunkEntry> chunks;
-    seastar::shared_mutex mu;
-    StorePtr store;
-
-    Extent();
-    ~Extent();
-    ExtentEntry GetExtentEntry();
-};
-
-using ExtentPtr = seastar::lw_shared_ptr<Extent>;
-class Store : public seastar::enable_lw_shared_from_this<Store> {
+class Store {
+#ifdef EXTENTNODE_UT_TEST
+   public:
+#else
+   private:
+#endif
     DevicePtr dev_ptr_;
     SuperBlock super_block_;
     uint64_t used_ = 0;
@@ -48,6 +41,7 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
     std::queue<uint32_t> free_chunks_;
 
     JournalPtr journal_ptr_;
+    seastar::gate gate_;
 
     // key = extent index
     LRUCache<uint32_t, std::string> last_sector_cache_;
@@ -65,18 +59,21 @@ class Store : public seastar::enable_lw_shared_from_this<Store> {
 
     inline bool CanWrite() { return dev_status_ == DevStatus::NORMAL; }
 
+    seastar::future<Status<>> SaveExtentMeta(const ExtentEntry& ent);
+    seastar::future<Status<>> SaveChunkMeta(const ChunkEntry& ent);
+
     friend struct Extent;
+    friend class Journal;
 
    public:
     static seastar::future<StorePtr> Load(std::string_view name,
                                           bool spdk_nvme = false,
-                                          size_t cache_cap = 1024);
+                                          size_t cache_cap = 1024,
+                                          size_t journal_max_size = 16 << 20);
 
     static seastar::future<bool> Format(std::string_view name,
                                         uint32_t cluster_id, DevType dev_type,
-                                        uint32_t dev_id,
-                                        uint64_t log_cap = 16 << 20,
-                                        uint64_t capacity = 0);
+                                        uint32_t dev_id, uint64_t capacity = 0);
 
     Store(size_t cache_capacity = 1024) : last_sector_cache_(cache_capacity) {}
 
